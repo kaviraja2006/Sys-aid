@@ -5,6 +5,7 @@ Produces a valid React Flow JSON graph from a user description.
 import json
 import re
 from app.core.llm import call_llm
+from app.core.rag import search_knowledge
 from typing import Optional, Dict, Any, List
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -23,7 +24,6 @@ _SYSTEM = (
     'Edge source and target must exactly match existing node ids. '
     'Output raw JSON only. First character must be "{".'
 )
-
 
 def _summarise_design(design: Optional[Dict[str, Any]]) -> Optional[Dict]:
     """Send only ids + labels of existing nodes — not the full node objects."""
@@ -150,6 +150,11 @@ async def generate_design(
     req_config: Any = None,
 ):
     payload: Dict[str, Any] = {"request": user_prompt}
+
+    # Fetch context from knowledge base
+    context = search_knowledge(user_prompt)
+    if context:
+        payload["knowledge_base_context"] = context
 
     history = _trim_history(chat_history)
     if history:

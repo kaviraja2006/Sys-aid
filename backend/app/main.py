@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import routes, chats
 from app.core.llm import stop_ollama as _stop_ollama, close_http_client, _warmup
+from app.core.rag import init_rag
 from contextlib import asynccontextmanager
 import asyncio
 
@@ -13,7 +14,12 @@ async def lifespan(app: FastAPI):
     # This runs in the background — server is ready immediately, warmup finishes
     # within a few seconds behind the scenes.
     asyncio.create_task(_warmup())
-    print("SysAid AI: server ready. LLM pre-warm running in background...")
+    
+    # Initialize RAG and Vector DB without blocking event loop
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, init_rag)
+    
+    print("SysAid AI: server ready. LLM pre-warm and RAG initialized in background...")
 
     yield  # ← app runs here
 
