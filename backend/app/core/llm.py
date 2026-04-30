@@ -192,7 +192,7 @@ async def call_llm_stream(
         messages=messages,
         api_key=api_key or "dummy-key",
         temperature=0.2,
-        max_tokens=512,
+        max_tokens=4096,  # Increased from 512 to prevent partial responses
         stream=True,
     )
     if api_base:
