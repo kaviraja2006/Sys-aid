@@ -1,43 +1,51 @@
-# ── Python ────────────────────────────────────────────────────────────────────
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .Python
 *.egg-info/
+.eggs/
 dist/
 build/
-.eggs/
+*.so
 
 # Virtual environments
-venv/
 .venv/
+venv/
 env/
-ENV/
 
-# ── Environment / Secrets ─────────────────────────────────────────────────────
+# Data & DB artifacts — do NOT commit these (large binary files)
+backend/app/data/chroma_db/
+backend/app/data/*.sqlite3
+backend/app/data/*.db
+backend/app/data/*.pickle
+backend/app/data/*.bin
+*.sqlite3
+*.db
+*.pickle
+*.pkl
+
+# Env files
 .env
 .env.*
-*.key
-secrets.json
+!.env.example
 
-# ── Node / Frontend ───────────────────────────────────────────────────────────
+# Node
 node_modules/
-dist/
-.next/
-out/
+frontend/dist/
+frontend/.vite/
 
-# ── User session data (chat history JSON files) ───────────────────────────────
-backend/app/data/chats/*.json
-
-# ── IDE / OS ──────────────────────────────────────────────────────────────────
+# IDE
 .vscode/
 .idea/
+*.suo
+*.user
+
+# OS
 .DS_Store
 Thumbs.db
-*.swp
-*.swo
 
-# ── Logs ─────────────────────────────────────────────────────────────────────
+# Logs
 *.log
-logs/
+npm-debug.log*

@@ -68,12 +68,10 @@ def search_knowledge(query_text: str, n_results: int = 3) -> str:
         return ""
         
     try:
-        # Check how many items are actually in the collection
         count = _collection.count()
         if count == 0:
             return ""
             
-        # Don't ask for more results than we have
         actual_n = min(n_results, count)
         
         results = _collection.query(
@@ -85,8 +83,53 @@ def search_knowledge(query_text: str, n_results: int = 3) -> str:
             return ""
             
         context_chunks = results["documents"][0]
-        context_str = "\n\n".join([f"--- Context Chunk {i+1} ---\n{chunk}" for i, chunk in enumerate(context_chunks)])
-        return context_str
+        return "\n\n".join([f"--- Context {i+1} ---\n{chunk}" for i, chunk in enumerate(context_chunks)])
     except Exception as e:
-        print(f"[RAG] Error querying knowledge base: {e}")
+        print(f"[RAG] Query error: {e}")
         return ""
+
+
+async def search_knowledge_async(query_text: str, n_results: int = 3) -> str:
+    """
+    Async wrapper — runs the blocking ChromaDB + embedding inference in a
+    thread pool so it never stalls the FastAPI event loop.
+    Also caches results for 5 minutes to avoid re-embedding the same query.
+    """
+    import asyncio
+    from app.core.cache import rag_cache
+
+    # Check the RAG cache first — avoids sentence-transformer inference entirely
+    cache_key = f"{query_text}:{n_results}"
+    cached = rag_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, search_knowledge, query_text, n_results)
+
+    # Store in RAG cache for next time
+    rag_cache.set(cache_key, result)
+    return result
+
+def ingest_document(text: str, filename: str):
+    """Chunks and ingests a custom document into ChromaDB."""
+    if not _collection:
+        return
+        
+    # simple chunking by paragraphs
+    chunks = [c.strip() for c in text.split('\n\n') if len(c.strip()) > 50]
+    if not chunks:
+        return
+        
+    documents = []
+    metadatas = []
+    ids = []
+    
+    import uuid
+    for i, chunk in enumerate(chunks):
+        documents.append(chunk)
+        metadatas.append({"source": filename, "type": "user_upload"})
+        ids.append(str(uuid.uuid4()))
+        
+    _collection.upsert(documents=documents, metadatas=metadatas, ids=ids)
+    print(f"[RAG] Ingested {len(documents)} chunks from {filename}")

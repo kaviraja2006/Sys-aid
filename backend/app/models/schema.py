@@ -1,8 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
 
 class GenerateRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(..., max_length=4000)
     current_design: Optional[Dict[str, Any]] = None
     chat_history: Optional[List[Dict[str, Any]]] = None
     
@@ -14,7 +14,7 @@ class GenerateRequest(BaseModel):
 
 class Node(BaseModel):
     id: str
-    type: str # e.g., API Gateway, Database, Cache, Service
+    type: str # database, server, client, cloud, cache, default
     label: str
     limit: Optional[int] = None
     cache_boost: Optional[float] = 0.0

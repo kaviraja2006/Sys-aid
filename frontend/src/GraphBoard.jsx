@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef, memo } from 'react';
 import {
   ReactFlow,
   MiniMap,
@@ -6,13 +6,18 @@ import {
   Background,
   addEdge,
   Panel,
-  reconnectEdge
+  reconnectEdge,
+  useReactFlow,
+  getNodesBounds,
+  getViewportForBounds
 } from '@xyflow/react';
-import { LayoutGrid } from 'lucide-react';
+import { LayoutGrid, Download, Plus , RefreshCcw  } from 'lucide-react';
+import { toPng } from 'html-to-image';
 import '@xyflow/react/dist/style.css';
 import ArchitectureNode from './ArchitectureNode';
+import { templates } from './templates';
 
-export default function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAutoLayout }) {
+function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAutoLayout, onGraphUpdate, isGenerating, genTokens }) {
 
   const nodeTypes = useMemo(() => ({ archNode: ArchitectureNode }), []);
 
@@ -28,8 +33,52 @@ export default function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange,
     [setEdges],
   );
 
+  const reactFlowWrapper = useRef(null);
+  const { screenToFlowPosition } = useReactFlow();
+
+  const handleExport = useCallback(() => {
+    if (nodes.length === 0) return;
+    const viewportElement = document.querySelector('.react-flow__viewport');
+    if (!viewportElement) return;
+
+    // Calculate the bounding box of all nodes
+    const bounds = getNodesBounds(nodes);
+    const width = bounds.width + 100; // Add padding
+    const height = bounds.height + 100;
+
+    // Get the viewport coordinates required to show the bounds
+    const viewport = getViewportForBounds(bounds, width, height, 0.5, 2, 0.1);
+
+    toPng(viewportElement, {
+      backgroundColor: '#0B0C0E',
+      width: width,
+      height: height,
+      style: {
+        width: `${width}px`,
+        height: `${height}px`,
+        transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+      },
+    }).then((dataUrl) => {
+      const a = document.createElement('a');
+      a.setAttribute('download', 'architecture.png');
+      a.setAttribute('href', dataUrl);
+      a.click();
+    });
+  }, [nodes]);
+
+  const addManualNode = (type) => {
+    const newNode = {
+      id: `manual_${Date.now()}`,
+      type: 'archNode',
+      position: { x: 100, y: 100 }, // Defaults, user can drag
+      data: { label: `New ${type}`, systemType: type, description: 'Double click to edit' },
+      style: { background: '#151618', color: '#EDEEF0', border: '1px solid #2C2D31', borderRadius: '8px', padding: '12px 16px', fontSize: '13px', fontWeight: '500', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -1px rgba(0, 0, 0, 0.4)', width: '180px', textAlign: 'center', letterSpacing: '0.01em', borderTop: '3px solid #3B82F6' }
+    };
+    onNodesChange([{ type: 'add', item: newNode }]);
+  };
+
   return (
-    <div className="flex-1 h-full relative font-sans" style={{ backgroundColor: '#0B0C0E' }}>
+    <div className="flex-1 h-full relative font-sans" style={{ backgroundColor: '#0B0C0E' }} ref={reactFlowWrapper}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -47,58 +96,97 @@ export default function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange,
         fitView
         proOptions={{ hideAttribution: true }}
       >
-        <Controls 
-          style={{ 
-            display: 'flex', 
-            flexDirection: 'column', 
-            backgroundColor: '#151618', 
+        <Controls
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            backgroundColor: '#151618',
             borderRadius: '8px',
             border: '1px solid #2C2D31',
             boxShadow: '0 4px 6px rgba(0,0,0,0.3)',
             overflow: 'hidden'
           }}
         />
-        <MiniMap 
-          nodeStrokeWidth={3} 
-          zoomable 
-          pannable 
-          style={{ backgroundColor: '#050505', border: '1px solid #1F2023', borderRadius: '8px' }} 
-          nodeColor="#2C2D31" 
+        <MiniMap
+          nodeStrokeWidth={3}
+          zoomable
+          pannable
+          style={{ backgroundColor: '#050505', border: '1px solid #1F2023', borderRadius: '8px' }}
+          nodeColor="#2C2D31"
           maskColor="rgba(0, 0, 0, 0.6)"
         />
         <Background variant="dots" gap={20} size={1.5} color="#1F2023" />
-        
-        <Panel position="top-right" className="bg-[#050505]/95 backdrop-blur-md border border-[#1f2023] p-4 rounded-xl mr-4 mt-4 shadow-xl flex flex-col items-end w-64">
-            <div className="flex justify-between items-center w-full mb-3">
-              <h3 className="text-[13px] font-semibold text-gray-100 uppercase tracking-wider mb-1">Architecture Graph</h3>
-            </div>
-            
-            <div className="w-full flex flex-col gap-3">
-                {/* Auto Layout Button */}
-                <button 
-                  onClick={onAutoLayout}
-                  disabled={nodes.length === 0}
-                  className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/20 rounded-lg text-[12px] font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <LayoutGrid size={14} />
-                  ✨ Auto-Layout
-                </button>
 
-                {/* Status Indicator */}
-                {nodes.length > 0 ? (
-                    <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse border border-green-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]"></span>
-                        <p className="text-[12px] text-gray-400">Interactive Canvas active</p>
-                    </div>
-                ) : (
-                    <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse border border-yellow-400 shadow-[0_0_8px_rgba(234,179,8,0.5)]"></span>
-                        <p className="text-[12px] text-gray-400">Waiting for prompt...</p>
-                    </div>
-                )}
+        {isGenerating && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/40 pointer-events-none">
+            <div className="bg-[#151618] border border-[#2c2d31] rounded-xl p-6 text-center backdrop-blur-md shadow-xl">
+              <RefreshCcw className="animate-spin text-blue-400 mx-auto mb-3" />
+              <p className="text-gray-300 text-sm">Drawing architecture...</p>
+              <p className="text-gray-500 text-xs mt-1">{genTokens} tokens generated</p>
             </div>
+          </div>
+        )}
+
+        <Panel position="top-right" className="bg-[#050505]/95 backdrop-blur-md border border-[#1f2023] p-4 rounded-xl mr-4 mt-4 shadow-xl flex flex-col items-end w-64 gap-4">
+          <div className="flex justify-between items-center w-full">
+            <h3 className="text-[13px] font-semibold text-gray-100 uppercase tracking-wider mb-1">Architecture Graph</h3>
+            <button onClick={handleExport} className="p-1.5 hover:bg-[#1f2023] rounded text-gray-400 hover:text-blue-400" title="Export as PNG"><Download size={14} /></button>
+          </div>
+
+          <div className="w-full grid grid-cols-2 gap-2 pb-2 border-b border-[#1f2023]">
+            <button onClick={() => addManualNode('server')} className="text-[11px] py-1 bg-[#1a1b1e] border border-[#2c2d31] rounded hover:border-blue-500 text-gray-300">Add Server</button>
+            <button onClick={() => addManualNode('database')} className="text-[11px] py-1 bg-[#1a1b1e] border border-[#2c2d31] rounded hover:border-emerald-500 text-gray-300">Add DB</button>
+            <button onClick={() => addManualNode('client')} className="text-[11px] py-1 bg-[#1a1b1e] border border-[#2c2d31] rounded hover:border-indigo-500 text-gray-300">Add Client</button>
+            <button onClick={() => addManualNode('cache')} className="text-[11px] py-1 bg-[#1a1b1e] border border-[#2c2d31] rounded hover:border-amber-500 text-gray-300">Add Cache</button>
+          </div>
+
+          <div className="w-full pb-2 border-b border-[#1f2023]">
+            <select
+              onChange={(e) => {
+                if (!e.target.value) return;
+                const tpl = templates[e.target.value];
+                if (tpl && window.confirm(`Load ${tpl.name}? This will overwrite your board.`)) {
+                  onGraphUpdate(tpl.nodes, tpl.edges);
+                }
+                e.target.value = "";
+              }}
+              className="w-full text-[11px] py-1.5 px-2 bg-[#1a1b1e] border border-[#2c2d31] rounded text-gray-300 outline-none"
+            >
+              <option value="">Load Template...</option>
+              {Object.entries(templates).map(([key, tpl]) => (
+                <option key={key} value={key}>{tpl.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="w-full flex flex-col gap-3">
+            {/* Auto Layout Button */}
+            <button
+              onClick={onAutoLayout}
+              disabled={nodes.length === 0}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/20 rounded-lg text-[12px] font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <LayoutGrid size={14} />
+              ✨ Auto-Layout
+            </button>
+
+            {/* Status Indicator */}
+            {nodes.length > 0 ? (
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse border border-green-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]"></span>
+                <p className="text-[12px] text-gray-400">Interactive Canvas active</p>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse border border-yellow-400 shadow-[0_0_8px_rgba(234,179,8,0.5)]"></span>
+                <p className="text-[12px] text-gray-400">Waiting for prompt...</p>
+              </div>
+            )}
+          </div>
         </Panel>
       </ReactFlow>
     </div>
   );
 }
+
+export default memo(GraphBoard);

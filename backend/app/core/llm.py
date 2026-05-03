@@ -25,10 +25,18 @@ litellm.suppress_debug_info = True
 
 # ── 2. Shared persistent httpx client — one SSL handshake, keep-alive pool ──
 #    litellm accepts a custom async_httpx_client so all our calls reuse it.
+# Enable HTTP/2 only if the optional ``h2`` package is installed.
+# This avoids a hard dependency on ``httpx[http2]`` on Windows where it may be missing.
+try:
+    import h2  # noqa: F401
+    _http2_enabled = True
+except ImportError:
+    _http2_enabled = False
+
 _http_client = httpx.AsyncClient(
     timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
-    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-    # http2=True requires `pip install httpx[http2]` — using HTTP/1.1 keep-alive instead
+    limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+    http2=_http2_enabled,
 )
 litellm.aclient_session = _http_client  # type: ignore[attr-defined]
 
@@ -134,11 +142,13 @@ def _resolve_litellm_args(provider: str, api_key: str, model_name: str, api_url:
 # ── NON-STREAMING (generate-board — needs full JSON at once) ─────────────────
 async def call_llm(
     prompt: str,
+    system_prompt: str = "",
     provider: str = "ollama",
     api_key: str = "",
     model_name: str = "",
     api_url: str = "",
-    max_tokens: int = 1024,   # ← callers can override; design_service uses 2048
+    max_tokens: int = 1024,
+    stop: list = None,
 ):
     await _check_managed_process(provider, api_url)
 
@@ -149,14 +159,21 @@ async def call_llm(
 
     litellm_model, api_base = _resolve_litellm_args(provider, api_key, model_name, api_url)
 
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
     kwargs = dict(
         model=litellm_model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=messages,
         api_key=api_key or "dummy-key",
         temperature=0.1,
         max_tokens=max_tokens,
         stream=False,
     )
+    if stop:
+        kwargs["stop"] = stop
     if api_base:
         kwargs["api_base"] = api_base
 
@@ -170,7 +187,6 @@ async def call_llm(
         raise
 
 
-# ── STREAMING (chat — real-time SSE) ─────────────────────────────────────────
 async def call_llm_stream(
     prompt: str,
     chat_history: list = None,
@@ -179,6 +195,8 @@ async def call_llm_stream(
     api_key: str = "",
     model_name: str = "",
     api_url: str = "",
+    max_tokens: int = 4096,
+    stop: list = None,
 ):
     await _check_managed_process(provider, api_url)
 
@@ -192,9 +210,11 @@ async def call_llm_stream(
         messages=messages,
         api_key=api_key or "dummy-key",
         temperature=0.2,
-        max_tokens=4096,  # Increased from 512 to prevent partial responses
+        max_tokens=max_tokens,
         stream=True,
     )
+    if stop:
+        kwargs["stop"] = stop
     if api_base:
         kwargs["api_base"] = api_base
 

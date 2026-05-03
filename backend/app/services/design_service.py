@@ -5,7 +5,7 @@ Produces a valid React Flow JSON graph from a user description.
 import json
 import re
 from app.core.llm import call_llm
-from app.core.rag import search_knowledge
+from app.core.rag import search_knowledge_async
 from typing import Optional, Dict, Any, List
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -143,16 +143,20 @@ def _safe_parse(raw: str) -> dict:
     )
 
 
-async def generate_design(
+async def generate_design_stream(
     user_prompt: str,
     current_design: Optional[Dict[str, Any]] = None,
     chat_history: Optional[List[Dict[str, str]]] = None,
     req_config: Any = None,
 ):
+    from app.core.llm import call_llm_stream
+    from app.core.cache import response_cache
+    import hashlib
+
     payload: Dict[str, Any] = {"request": user_prompt}
 
-    # Fetch context from knowledge base
-    context = search_knowledge(user_prompt)
+    # Fetch context from knowledge base (non-blocking)
+    context = await search_knowledge_async(user_prompt, n_results=2)
     if context:
         payload["knowledge_base_context"] = context
 
@@ -167,27 +171,49 @@ async def generate_design(
     else:
         payload["instruction"] = "Create a new design graph."
 
-    prompt = _SYSTEM + "\n\n" + json.dumps(payload, separators=(",", ":"))
+    prompt_text = json.dumps(payload, separators=(",", ":"))
 
-    response = ""
+    provider = req_config.provider if req_config else "ollama"
+    model_name = req_config.model_name if req_config else ""
+    api_key = req_config.api_key if req_config else ""
+    api_url = req_config.api_url if req_config else ""
+
+    # Custom cache key including design hash
+    cache_payload = prompt_text + str(hashlib.md5(json.dumps(summarised or {}).encode()).hexdigest())
+    cached = response_cache.get(cache_payload, provider, model_name)
+    if cached:
+        # If cached, yield it immediately as a single large chunk
+        yield f"data: {cached}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    full_response = ""
     try:
-        response = await call_llm(
-            prompt,
-            provider=req_config.provider if req_config else "ollama",
-            api_key=req_config.api_key if req_config else "",
-            model_name=req_config.model_name if req_config else "",
-            api_url=req_config.api_url if req_config else "",
-            max_tokens=2048,
+        # Use call_llm_stream with system_prompt
+        stream = call_llm_stream(
+            prompt=prompt_text,
+            chat_history=[], # We already put history in payload
+            system_prompt=_SYSTEM,
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name,
+            api_url=api_url,
+            max_tokens=1200,
+            stop=["\n\n\n"]
         )
-        return _safe_parse(response)
+        
+        async for chunk in stream:
+            full_response += chunk
+            # Wrap as SSE
+            yield f"data: {json.dumps(chunk)}\n\n"
 
-    except json.JSONDecodeError as e:
-        print(f"[design_service] JSON parse failed: {e}")
-        print(f"[design_service] Raw response: {response[:600]}")
-        return {
-            "error": f"Model returned invalid JSON: {e}",
-            "hint": "Try rephrasing, or switch to a more capable model (e.g. llama-3.3-70b-instruct for NVIDIA).",
-            "raw_response": response[:300],
-        }
+        # End of stream marker
+        yield "data: [DONE]\n\n"
+
+        # Save to cache after streaming is complete
+        # Only cache if it looks like valid JSON
+        if "{" in full_response and "}" in full_response:
+            response_cache.set(cache_payload, provider, model_name, full_response)
+            
     except Exception as e:
-        return {"error": str(e), "raw_response": response[:300]}
+        yield f"data: \n\n[Error: {str(e)}]\n\n"
