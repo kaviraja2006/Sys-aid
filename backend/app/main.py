@@ -28,8 +28,13 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_warmup())
     
     # Initialize RAG and Vector DB without blocking event loop
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, init_rag)
+    # Wrapped in try-catch so app continues even if RAG fails
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, init_rag)
+    except Exception as e:
+        print(f"⚠️  RAG initialization failed: {str(e)}")
+        print("App will continue without RAG support")
     
     # Initialize chat database
     await chats.init_db()
@@ -68,3 +73,13 @@ app.include_router(chats.router, prefix="/chats")
 @app.get("/")
 def root():
     return {"msg": "SysAid running"}
+
+
+@app.get("/health")
+def health():
+    """Health check endpoint for monitoring (no auth required)."""
+    from app.core.rag import _rag_available
+    return {
+        "status": "ok",
+        "rag_available": _rag_available
+    }

@@ -67,6 +67,17 @@ async def review(req: GenerateRequest):
     return result
 
 
+@router.get("/health")
+async def health_check():
+    """Check if backend is running and RAG is available."""
+    from app.core.rag import _rag_available
+    
+    return {
+        "status": "ok",
+        "rag_available": _rag_available
+    }
+
+
 # ── Cache management endpoints ────────────────────────────────────────────────
 
 @router.get("/cache/stats")

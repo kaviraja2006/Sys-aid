@@ -1,6 +1,7 @@
 import os
 import json
 import chromadb
+import shutil
 from chromadb.utils import embedding_functions
 
 DB_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db")
@@ -9,23 +10,56 @@ KNOWLEDGE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "knowledg
 # Use single global client
 _chroma_client = None
 _collection = None
+_rag_available = False
 
 def init_rag():
-    global _chroma_client, _collection
+    """
+    Initialize RAG system with graceful fallback.
+    If ChromaDB fails, RAG is disabled but app continues to work.
+    """
+    global _chroma_client, _collection, _rag_available
     
-    os.makedirs(os.path.dirname(DB_DIR), exist_ok=True)
-    
-    # Initialize Persistent Client
-    _chroma_client = chromadb.PersistentClient(path=DB_DIR)
-    
-    # We use the default embedding function (all-MiniLM-L6-v2) 
-    # it is free, offline, and lightweight.
-    ef = embedding_functions.DefaultEmbeddingFunction()
-    
-    _collection = _chroma_client.get_or_create_collection(
-        name="system_design_knowledge",
-        embedding_function=ef
-    )
+    try:
+        os.makedirs(os.path.dirname(DB_DIR), exist_ok=True)
+        
+        # Initialize Persistent Client
+        _chroma_client = chromadb.PersistentClient(path=DB_DIR)
+        
+        # We use the default embedding function (all-MiniLM-L6-v2) 
+        # it is free, offline, and lightweight.
+        ef = embedding_functions.DefaultEmbeddingFunction()
+        
+        _collection = _chroma_client.get_or_create_collection(
+            name="system_design_knowledge",
+            embedding_function=ef
+        )
+        _rag_available = True
+    except Exception as e:
+        print(f"[RAG] ⚠️  Failed to initialize ChromaDB: {str(e)}")
+        print(f"[RAG] Attempting to reset database...")
+        try:
+            # If database is corrupted, delete and retry
+            if os.path.exists(DB_DIR):
+                shutil.rmtree(DB_DIR)
+                print(f"[RAG] Deleted corrupted database at {DB_DIR}")
+            
+            # Retry initialization
+            os.makedirs(os.path.dirname(DB_DIR), exist_ok=True)
+            _chroma_client = chromadb.PersistentClient(path=DB_DIR)
+            ef = embedding_functions.DefaultEmbeddingFunction()
+            _collection = _chroma_client.get_or_create_collection(
+                name="system_design_knowledge",
+                embedding_function=ef
+            )
+            _rag_available = True
+            print("[RAG] ✓ Database reset successfully")
+        except Exception as retry_err:
+            print(f"[RAG] ✗ Failed to reset database: {str(retry_err)}")
+            print("[RAG] Continuing without RAG support...")
+            _rag_available = False
+            _chroma_client = None
+            _collection = None
+        return
     
     # Load knowledge base and upsert
     if os.path.exists(KNOWLEDGE_FILE):
