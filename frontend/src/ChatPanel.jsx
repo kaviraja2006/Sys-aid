@@ -296,11 +296,20 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
 
           if (data === '[DONE]') {
             // Stream complete — now parse the full buffered JSON and render once
+            // Backend may append a final canonical JSON chunk; use the last JSON-shaped block.
             let cleanedJson = fullJson;
-            const start = fullJson.indexOf('{');
-            if (start !== -1) {
-              cleanedJson = fullJson.substring(start).replace(/```json/gi, '').replace(/```/g, '').trim();
+            const withoutFences = fullJson.replace(/```json/gi, '').replace(/```/g, '');
+            const lastStart = withoutFences.lastIndexOf('{');
+            const lastEnd = withoutFences.lastIndexOf('}');
+            if (lastStart !== -1 && lastEnd !== -1 && lastEnd > lastStart) {
+              cleanedJson = withoutFences.slice(lastStart, lastEnd + 1).trim();
+            } else {
+              const firstStart = withoutFences.indexOf('{');
+              if (firstStart !== -1) cleanedJson = withoutFences.slice(firstStart).trim();
+              cleanedJson = cleanedJson.trim();
             }
+            // Remove unescaped control characters that can break JSON.parse
+            cleanedJson = cleanedJson.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
             try {
               const parsed = JSON.parse(cleanedJson);
               if (parsed && Array.isArray(parsed.nodes)) {

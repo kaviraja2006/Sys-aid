@@ -207,6 +207,18 @@ async def generate_design_stream(
             # Wrap as SSE
             yield f"data: {json.dumps(chunk)}\n\n"
 
+        # Try to parse/repair into strict JSON for the client.
+        # If repair succeeds, send the canonical JSON as the final chunk so the UI
+        # can reliably render even when the model emits slightly invalid JSON.
+        try:
+            parsed = _safe_parse(full_response)
+            canonical = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+            yield f"data: {json.dumps(canonical)}\n\n"
+            full_response = canonical
+        except Exception:
+            # If repair fails, fall back to raw output; client may still recover.
+            pass
+
         # End of stream marker
         yield "data: [DONE]\n\n"
 
