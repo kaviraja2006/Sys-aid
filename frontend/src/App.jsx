@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import ChatPanel from './ChatPanel';
 import GraphBoard from './GraphBoard';
+import NodeDetailSidebar from './NodeDetailSidebar';
 import { useNodesState, useEdgesState, ReactFlowProvider } from '@xyflow/react';
 import dagre from '@dagrejs/dagre';
 import './App.css';
@@ -76,6 +77,11 @@ function App() {
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [genTokens, setGenTokens] = useState(0);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [llmConfig, setLlmConfig] = useState(() => {
+    const saved = localStorage.getItem('sysaid_llm_config');
+    return saved ? JSON.parse(saved) : { provider: 'ollama', api_key: '', model_name: '', api_url: '' };
+  });
 
   const handleGraphUpdate = useCallback((newNodes, newEdges) => {
     if (!newNodes || newNodes.length === 0) {
@@ -104,6 +110,10 @@ function App() {
     setEdges(layoutedEdges);
   }, [nodes, edges, setNodes, setEdges]);
 
+  const handleNodeSelect = useCallback((node) => {
+    setSelectedNode(node);
+  }, []);
+
   return (
     <ReactFlowProvider>
       <div className="flex w-full h-screen overflow-hidden bg-background font-sans text-gray-100">
@@ -115,6 +125,7 @@ function App() {
           onGenerationStart={() => { setGenTokens(0); setIsGenerating(true); }}
           onGenerationFinish={() => { setIsGenerating(false); setGenTokens(0); }}
           onGenerationProgress={(count) => setGenTokens(count)}
+          setLlmConfig={setLlmConfig}
         />
 
         <GraphBoard
@@ -127,6 +138,14 @@ function App() {
           onGraphUpdate={handleGraphUpdate}
           isGenerating={isGenerating}
           genTokens={genTokens}
+          onNodeSelect={handleNodeSelect}
+        />
+
+        <NodeDetailSidebar
+          node={selectedNode}
+          isOpen={!!selectedNode}
+          onClose={() => setSelectedNode(null)}
+          llmConfig={llmConfig}
         />
       </div>
     </ReactFlowProvider>

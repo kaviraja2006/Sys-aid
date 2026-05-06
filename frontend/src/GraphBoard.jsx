@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, memo } from 'react';
+import { useCallback, useMemo, useRef, memo, useState } from 'react';
 import {
   ReactFlow,
   MiniMap,
@@ -11,14 +11,21 @@ import {
   getNodesBounds,
   getViewportForBounds
 } from '@xyflow/react';
-import { LayoutGrid, Download, Plus , RefreshCcw  } from 'lucide-react';
+import { LayoutGrid, Download, Plus, RefreshCcw, Copy, CheckCircle, Sparkles, Loader } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import '@xyflow/react/dist/style.css';
 import ArchitectureNode from './ArchitectureNode';
 import { templates } from './templates';
+import { copyMermaidToClipboard } from './utils/mermaidExport';
+import ReviewPanel from './ReviewPanel';
+import { api } from './config/api';
 
-function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAutoLayout, onGraphUpdate, isGenerating, genTokens }) {
+function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAutoLayout, onGraphUpdate, isGenerating, genTokens, onNodeSelect }) {
 
+  const [mermaidCopyStatus, setMermaidCopyStatus] = useState(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewData, setReviewData] = useState(null);
   const nodeTypes = useMemo(() => ({ archNode: ArchitectureNode }), []);
 
   // Connect handler for manual lines drawn natively by React Flow
@@ -66,6 +73,36 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
     });
   }, [nodes]);
 
+  const handleMermaidExport = useCallback(async () => {
+    if (nodes.length === 0) return;
+    const result = await copyMermaidToClipboard(nodes, edges);
+    setMermaidCopyStatus(result.success ? 'success' : 'error');
+    setTimeout(() => setMermaidCopyStatus(null), 2000);
+  }, [nodes, edges]);
+
+  const handleNodeClick = useCallback((event, node) => {
+    onNodeSelect?.(node);
+  }, [onNodeSelect]);
+
+  const handleReviewArchitecture = useCallback(async () => {
+    if (nodes.length === 0) return;
+    setReviewLoading(true);
+    try {
+      const response = await api.post('/review', {
+        current_design: { nodes, edges },
+        prompt: '',
+        provider: 'ollama'
+      });
+      setReviewData(response.data);
+      setReviewOpen(true);
+    } catch (error) {
+      console.error('Review failed:', error);
+      alert('Failed to review architecture. Please try again.');
+    } finally {
+      setReviewLoading(false);
+    }
+  }, [nodes, edges]);
+
   const addManualNode = (type) => {
     const newNode = {
       id: `manual_${Date.now()}`,
@@ -87,6 +124,7 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onReconnect={onReconnect}
+        onNodeClick={handleNodeClick}
         deleteKeyCode={["Backspace", "Delete"]}
         snapToGrid={true}
         snapGrid={[20, 20]}
@@ -130,7 +168,15 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
         <Panel position="top-right" className="bg-[#050505]/95 backdrop-blur-md border border-[#1f2023] p-4 rounded-xl mr-4 mt-4 shadow-xl flex flex-col items-end w-64 gap-4">
           <div className="flex justify-between items-center w-full">
             <h3 className="text-[13px] font-semibold text-gray-100 uppercase tracking-wider mb-1">Architecture Graph</h3>
-            <button onClick={handleExport} className="p-1.5 hover:bg-[#1f2023] rounded text-gray-400 hover:text-blue-400" title="Export as PNG"><Download size={14} /></button>
+            <div className="flex gap-2">
+              <button onClick={handleReviewArchitecture} disabled={nodes.length === 0 || reviewLoading} className="p-1.5 hover:bg-[#1f2023] rounded text-gray-400 hover:text-purple-400 disabled:opacity-50" title="Review Architecture">
+                {reviewLoading ? <RefreshCcw size={14} className="animate-spin" /> : <Sparkles size={14} />}
+              </button>
+              <button onClick={handleMermaidExport} disabled={nodes.length === 0} className="p-1.5 hover:bg-[#1f2023] rounded text-gray-400 hover:text-amber-400 disabled:opacity-50" title="Export as Mermaid">
+                {mermaidCopyStatus === 'success' ? <CheckCircle size={14} className="text-green-400" /> : <Copy size={14} />}
+              </button>
+              <button onClick={handleExport} disabled={nodes.length === 0} className="p-1.5 hover:bg-[#1f2023] rounded text-gray-400 hover:text-blue-400 disabled:opacity-50" title="Export as PNG"><Download size={14} /></button>
+            </div>
           </div>
 
           <div className="w-full grid grid-cols-2 gap-2 pb-2 border-b border-[#1f2023]">
@@ -160,6 +206,16 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
           </div>
 
           <div className="w-full flex flex-col gap-3">
+            {/* Review Architecture Button */}
+            <button
+              onClick={handleReviewArchitecture}
+              disabled={nodes.length === 0 || reviewLoading}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 border border-amber-500/20 rounded-lg text-[12px] font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {reviewLoading ? <Loader size={14} className="animate-spin" /> : <Sparkles size={14} />}
+              {reviewLoading ? 'Reviewing...' : 'Review Architecture'}
+            </button>
+
             {/* Auto Layout Button */}
             <button
               onClick={onAutoLayout}

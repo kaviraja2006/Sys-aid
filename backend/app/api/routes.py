@@ -4,6 +4,7 @@ from app.services.design_service import generate_design_stream
 from app.services.simulation_service import simulate_system
 from app.services.improve_service import improve_design
 from app.services.chat_service import handle_chat_stream
+from app.services.review_service import review_architecture
 from app.models.schema import GenerateRequest
 from app.core.cache import response_cache
 from app.core.rag import ingest_document
@@ -47,6 +48,23 @@ async def simulate(data: dict):
 @router.post("/improve")
 async def improve(data: dict):
     return await improve_design(data)
+
+
+@router.post("/review")
+async def review(req: GenerateRequest):
+    """Review an architecture design and return scores + improvement suggestions."""
+    nodes = req.current_design.get("nodes", []) if req.current_design else []
+    edges = req.current_design.get("edges", []) if req.current_design else []
+    
+    result = await review_architecture(
+        nodes=nodes,
+        edges=edges,
+        provider=req.provider if req else "ollama",
+        api_key=req.api_key if req else "",
+        model_name=req.model_name if req else "",
+        api_url=req.api_url if req else "",
+    )
+    return result
 
 
 # ── Cache management endpoints ────────────────────────────────────────────────

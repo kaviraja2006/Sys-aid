@@ -108,6 +108,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     if (messages.length <= 1) return;
     if (saveTimeout.current) clearTimeout(saveTimeout.current);
     saveTimeout.current = setTimeout(async () => {
+      if (loading || drawing) return;
       try {
         await api.post('/chats/', {
           id: sessionId,
@@ -120,9 +121,9 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       } catch (err) {
         console.error("Failed to save", err);
       }
-    }, 2000);
+    }, 5000);
     return () => clearTimeout(saveTimeout.current);
-  }, [messages, currentNodes, currentEdges, sessionId, sessionTitle]);
+  }, [messages, currentNodes, currentEdges, sessionId, sessionTitle, loading, drawing]);
 
   const loadHistoryList = async () => {
     setHistoryLoading(true);
