@@ -1,0 +1,14 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "env": {
+    "VITE_API_URL": "@vite_api_url",
+    "VITE_BACKEND_API_KEY": "@vite_backend_api_key"
+  },
+  "redirects": [
+    {
+      "source": "/:path*",
+      "destination": "/"
+    }
+  ]
+}

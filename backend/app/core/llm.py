@@ -15,6 +15,7 @@ import asyncio
 import subprocess
 import litellm
 import httpx
+import os
 
 from app.core.cache import response_cache
 from app.core.history import build_message_list
@@ -120,6 +121,36 @@ async def _check_managed_process(provider: str, api_url: str = ""):
         await loop.run_in_executor(None, _stop_ollama_sync)
 
 
+def _resolve_api_key(provider: str, api_key: str) -> str:
+    """
+    Resolve API key from request or environment variables (fallback for production).
+    
+    Priority:
+    1. Use provided api_key (from frontend settings)
+    2. Fall back to environment variable based on provider
+    3. Use dummy key (for local ollama)
+    """
+    if api_key and api_key.strip():
+        return api_key
+    
+    # Map provider to environment variable name
+    env_map = {
+        "nvidia": "NVIDIA_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "gemini": "GOOGLE_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }
+    
+    env_var = env_map.get(provider)
+    if env_var:
+        env_api_key = os.getenv(env_var, "").strip()
+        if env_api_key:
+            return env_api_key
+    
+    # Fallback for local providers or no key available
+    return "dummy-key"
+
+
 def _resolve_litellm_args(provider: str, api_key: str, model_name: str, api_url: str):
     """Map provider string → (litellm model id, api_base)."""
     if provider == "ollama":
@@ -157,6 +188,9 @@ async def call_llm(
     if cached:
         return cached
 
+    # ✅ Resolve API key: use frontend's key or fall back to .env
+    resolved_api_key = _resolve_api_key(provider, api_key)
+    
     litellm_model, api_base = _resolve_litellm_args(provider, api_key, model_name, api_url)
 
     messages = []
@@ -167,7 +201,7 @@ async def call_llm(
     kwargs = dict(
         model=litellm_model,
         messages=messages,
-        api_key=api_key or "dummy-key",
+        api_key=resolved_api_key,
         temperature=0.1,
         max_tokens=max_tokens,
         stream=False,
@@ -203,12 +237,15 @@ async def call_llm_stream(
     # Build compact, windowed message list (no fat history blobs)
     messages = build_message_list(system_prompt, chat_history, prompt)
 
+    # ✅ Resolve API key: use frontend's key or fall back to .env
+    resolved_api_key = _resolve_api_key(provider, api_key)
+    
     litellm_model, api_base = _resolve_litellm_args(provider, api_key, model_name, api_url)
 
     kwargs = dict(
         model=litellm_model,
         messages=messages,
-        api_key=api_key or "dummy-key",
+        api_key=resolved_api_key,
         temperature=0.2,
         max_tokens=max_tokens,
         stream=True,
