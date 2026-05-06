@@ -1,0 +1,15 @@
+frontend/
+node_modules/
+.git/
+.gitignore
+README.md
+DEPLOYMENT.md
+QUICK_DEPLOY.md
+API_KEY_FLOW.md
+AUDIT_REPORT.md
+*.md
+.vscode/
+.idea/
+*.pyc
+__pycache__/
+.DS_Store
