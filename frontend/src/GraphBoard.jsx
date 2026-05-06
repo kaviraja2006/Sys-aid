@@ -115,7 +115,7 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
   };
 
   return (
-    <div className="flex-1 h-full relative font-sans" style={{ backgroundColor: '#0B0C0E' }} ref={reactFlowWrapper}>
+    <div className="flex-1 h-full relative font-sans" style={{ backgroundColor: '#0B0C0E', width: '100%', height: '100%' }} ref={reactFlowWrapper}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -133,6 +133,7 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
         panOnDrag={[1]}
         fitView
         proOptions={{ hideAttribution: true }}
+        style={{ width: '100%', height: '100%' }}
       >
         <Controls
           style={{

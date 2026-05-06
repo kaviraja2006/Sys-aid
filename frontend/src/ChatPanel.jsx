@@ -295,55 +295,143 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
           if (!data) continue;
 
           if (data === '[DONE]') {
-            // Stream complete — now parse the full buffered JSON and render once
-            // Backend may append a final canonical JSON chunk; use the last JSON-shaped block.
-            let cleanedJson = fullJson;
-            const withoutFences = fullJson.replace(/```json/gi, '').replace(/```/g, '');
-            const lastStart = withoutFences.lastIndexOf('{');
-            const lastEnd = withoutFences.lastIndexOf('}');
-            if (lastStart !== -1 && lastEnd !== -1 && lastEnd > lastStart) {
-              cleanedJson = withoutFences.slice(lastStart, lastEnd + 1).trim();
-            } else {
-              const firstStart = withoutFences.indexOf('{');
-              if (firstStart !== -1) cleanedJson = withoutFences.slice(firstStart).trim();
-              cleanedJson = cleanedJson.trim();
-            }
-            // Remove unescaped control characters that can break JSON.parse
-            cleanedJson = cleanedJson.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+            break;
+          }
+
+          if (data.startsWith('{') || data.startsWith('"')) {
+            let parsedData;
             try {
-              const parsed = JSON.parse(cleanedJson);
-              if (parsed && Array.isArray(parsed.nodes)) {
-                const safeNodes = parsed.nodes.map((n, i) => ({
-                  ...n,
-                  id: n.id || `node-${i}`,
-                  type: 'archNode',
-                  data: {
-                    label: n.data?.label || 'Node',
-                    description: n.data?.description || '',
-                    systemType: n.data?.systemType || 'default'
-                  }
-                }));
-                const safeEdges = (parsed.edges || []).map((e, i) => ({
-                  ...e,
-                  id: e.id || `edge-${i}`,
-                  source: e.source || '',
-                  target: e.target || ''
-                })).filter(e => e.source && e.target);
-                onGraphUpdate(safeNodes, safeEdges);
-              }
-            } catch (err) {
-              console.error('JSON parse failed:', err, cleanedJson.slice(0, 200));
+              parsedData = JSON.parse(data);
+            } catch (e) {
+              parsedData = data;
             }
+
+            if (parsedData && typeof parsedData === 'object' && parsedData.error) {
+              console.error('Graph generation error:', parsedData.error);
+              alert(`Draw failed: ${parsedData.error}`);
+              return;
+            }
+
+            fullJson += typeof parsedData === 'string' ? parsedData : String(parsedData);
           } else {
-            // Accumulate JSON chunk
-            let textChunk = '';
-            try { textChunk = JSON.parse(data); } catch (e) { textChunk = data; }
-            fullJson += textChunk;
-            tokenCount += 1;
-            onGenerationProgress?.(tokenCount);
+            fullJson += data;
+          }
+          tokenCount += 1;
+          onGenerationProgress?.(tokenCount);
+        }
+      }
+
+      if (lineBuffer) {
+        const remaining = lineBuffer.trim();
+        if (remaining.startsWith('data: ')) {
+          const data = remaining.slice(6).trim();
+          if (data && data !== '[DONE]') {
+            if (data.startsWith('{') || data.startsWith('"')) {
+              let parsedData;
+              try { parsedData = JSON.parse(data); } catch (e) { parsedData = data; }
+              if (parsedData && typeof parsedData === 'object' && parsedData.error) {
+                console.error('Graph generation error:', parsedData.error);
+                alert(`Draw failed: ${parsedData.error}`);
+                return;
+              }
+              fullJson += typeof parsedData === 'string' ? parsedData : String(parsedData);
+            } else {
+              fullJson += data;
+            }
           }
         }
       }
+
+      const extractJson = (text) => {
+        let s = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+        s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+
+        let inString = false;
+        let escape = false;
+        let depth = 0;
+        let start = -1;
+        let lastObject = '';
+
+        for (let i = 0; i < s.length; i += 1) {
+          const ch = s[i];
+          if (escape) {
+            escape = false;
+            continue;
+          }
+          if (ch === '\\') {
+            if (inString) escape = true;
+            continue;
+          }
+          if (ch === '"') {
+            inString = !inString;
+            continue;
+          }
+          if (inString) continue;
+
+          if (ch === '{') {
+            if (depth === 0) start = i;
+            depth += 1;
+          } else if (ch === '}') {
+            if (depth > 0) {
+              depth -= 1;
+              if (depth === 0 && start !== -1) {
+                lastObject = s.slice(start, i + 1);
+                start = -1;
+              }
+            }
+          }
+        }
+
+        if (lastObject) {
+          return lastObject;
+        }
+
+        const firstStart = s.indexOf('{');
+        const lastEnd = s.lastIndexOf('}');
+        if (firstStart !== -1 && lastEnd !== -1 && lastEnd > firstStart) {
+          return s.slice(firstStart, lastEnd + 1);
+        }
+
+        return s;
+      };
+
+      const cleanedJson = extractJson(fullJson);
+      if (cleanedJson.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(cleanedJson);
+          if (parsed && Array.isArray(parsed.nodes)) {
+            const safeNodes = parsed.nodes.map((n, i) => ({
+              ...n,
+              id: n.id || `node-${i}`,
+              type: 'archNode',
+              data: {
+                label: n.data?.label || 'Node',
+                description: n.data?.description || '',
+                systemType: n.data?.systemType || 'default'
+              }
+            }));
+            const safeEdges = (parsed.edges || []).map((e, i) => ({
+              ...e,
+              id: e.id || `edge-${i}`,
+              source: e.source || '',
+              target: e.target || ''
+            })).filter(e => e.source && e.target);
+            onGraphUpdate(safeNodes, safeEdges);
+          } else {
+            throw new Error('Payload did not contain nodes array');
+          }
+        } catch (err) {
+          console.error('JSON parse failed:', err, cleanedJson.slice(0, 200));
+          alert('Draw failed: generated output was not valid graph JSON. See console for details.');
+        }
+      } else if (fullJson.includes('[Error:')) {
+        console.error('Graph generation error:', fullJson);
+        alert(`Draw failed: ${fullJson.trim()}`);
+      } else {
+        console.error('Graph generation returned non-JSON output:', fullJson);
+        alert('Draw failed: generated output was not valid JSON.');
+      }
+
       setInputValue('');
     } catch (error) {
       alert(`Draw failed: ${error.message}`);

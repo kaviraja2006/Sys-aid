@@ -8,4 +8,4 @@ python-multipart==0.0.20
 chromadb==0.6.3
 slowapi==0.1.9
 aiosqlite==0.20.0
-uvloop==0.21.0
+uvloop==0.21.0; sys_platform != "win32"

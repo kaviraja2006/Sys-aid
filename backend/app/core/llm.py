@@ -262,7 +262,7 @@ async def call_llm_stream(
             if delta:
                 yield delta
     except Exception as e:
-        yield f"\n\n[Error: {str(e)}]"
+        raise
 
 
 def stop_ollama():

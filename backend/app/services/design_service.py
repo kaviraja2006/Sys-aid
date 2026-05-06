@@ -198,11 +198,17 @@ async def generate_design_stream(
             api_key=api_key,
             model_name=model_name,
             api_url=api_url,
-            max_tokens=1200,
-            stop=["\n\n\n"]
+            max_tokens=2000,
+            stop=[]
         )
         
         async for chunk in stream:
+            if isinstance(chunk, str) and chunk.strip().startswith('[Error:'):
+                error_text = chunk.strip()
+                yield f"data: {json.dumps({ 'error': error_text })}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
             full_response += chunk
             # Wrap as SSE
             yield f"data: {json.dumps(chunk)}\n\n"
@@ -228,4 +234,5 @@ async def generate_design_stream(
             response_cache.set(cache_payload, provider, model_name, full_response)
             
     except Exception as e:
-        yield f"data: \n\n[Error: {str(e)}]\n\n"
+        yield f"data: {json.dumps({ 'error': str(e) })}\n\n"
+        yield "data: [DONE]\n\n"

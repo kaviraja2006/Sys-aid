@@ -24,17 +24,20 @@ async def handle_chat_stream(
     context = await search_knowledge_async(user_prompt, n_results=1)
     prompt_to_use = f"{user_prompt}\n\n[Context]:\n{context}" if context else user_prompt
     
-    async for chunk in call_llm_stream(
-        prompt_to_use,
-        chat_history=chat_history,
-        system_prompt=_SYSTEM,
-        provider=req_config.provider if req_config else "ollama",
-        api_key=req_config.api_key if req_config else "",
-        model_name=req_config.model_name if req_config else "",
-        api_url=req_config.api_url if req_config else "",
-        max_tokens=512,  # Chat needs fast replies, not novels
-    ):
-        # Format as Server-Sent Event with JSON escaping to preserve newlines
-        yield f"data: {json.dumps(chunk)}\n\n"
-    
-    yield "data: [DONE]\n\n"
+    try:
+        async for chunk in call_llm_stream(
+            prompt_to_use,
+            chat_history=chat_history,
+            system_prompt=_SYSTEM,
+            provider=req_config.provider if req_config else "ollama",
+            api_key=req_config.api_key if req_config else "",
+            model_name=req_config.model_name if req_config else "",
+            api_url=req_config.api_url if req_config else "",
+            max_tokens=512,  # Chat needs fast replies, not novels
+        ):
+            # Format as Server-Sent Event with JSON escaping to preserve newlines
+            yield f"data: {json.dumps(chunk)}\n\n"
+    except Exception as e:
+        yield f"data: {json.dumps(str(e))}\n\n"
+    finally:
+        yield "data: [DONE]\n\n"
