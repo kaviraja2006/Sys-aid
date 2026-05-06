@@ -55,8 +55,13 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Allowed origins
-allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
-origins = [origin.strip() for origin in allowed_origins_str.split(",")]
+# Support both `ALLOWED_ORIGINS` (current) and `CORS_ORIGINS` (legacy/docs) env vars.
+allowed_origins_str = (
+    os.getenv("ALLOWED_ORIGINS")
+    or os.getenv("CORS_ORIGINS")
+    or "http://localhost:5173,http://127.0.0.1:5173,https://sys-aid.netlify.app"
+)
+origins = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,4 +87,13 @@ def health():
     return {
         "status": "ok",
         "rag_available": _rag_available
+    }
+
+
+@app.get("/health/cors")
+def health_cors(request: Request):
+    """Debug endpoint to verify deployed CORS configuration."""
+    return {
+        "request_origin": request.headers.get("origin"),
+        "allowed_origins": origins,
     }

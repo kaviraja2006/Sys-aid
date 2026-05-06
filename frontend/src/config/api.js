@@ -1,7 +1,14 @@
 import axios from 'axios';
 import axiosRetry from 'axios-retry';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+const PROD_FALLBACK_API_URL = 'https://sys-aid-1.onrender.com';
+const isLocalHost =
+  typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1');
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  (isLocalHost ? 'http://127.0.0.1:8000' : PROD_FALLBACK_API_URL);
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY || '';
 
 const api = axios.create({
