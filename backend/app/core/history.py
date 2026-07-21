@@ -10,6 +10,9 @@ from typing import List, Dict, Any, Optional
 WINDOW_SIZE   = 6   # recent messages sent verbatim
 SUMMARY_EVERY = 10  # summarize when history grows past this
 MAX_MSG_CHARS = 800 # truncate individual messages longer than this
+MAX_SUMMARY_MESSAGES = 15  # cap how many older messages get summarized, so a
+                            # very long conversation can't blow up the prompt
+                            # size (and starve the completion's token budget)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -47,6 +50,9 @@ def build_summary_prefix(history: Optional[List[Dict[str, Any]]]) -> Optional[Di
     older = history[:-WINDOW_SIZE]
     if not older:
         return None
+    # Keep the most recent of the "older" messages — they're the most likely
+    # to still be relevant to the final decision — and drop the rest.
+    older = older[-MAX_SUMMARY_MESSAGES:]
 
     lines = []
     for m in older:

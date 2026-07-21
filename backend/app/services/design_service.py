@@ -23,6 +23,9 @@ _SYSTEM = (
     'Each edge: {"id":"string","source":"nodeId","target":"nodeId","label":"string","type":"smoothstep","animated":true} '
     'Every node must be connected via at least one edge. '
     'Edge source and target must exactly match existing node ids. '
+    'The chat history is a running discussion where the user may add, remove, or revise '
+    'components over several turns — always resolve to the LATEST decision on each point, '
+    'not earlier ones that were later changed or rejected. '
     'Output raw JSON only. First character must be "{".'
 )
 
@@ -42,14 +45,7 @@ def _summarise_design(design: Optional[Dict[str, Any]]) -> Optional[Dict]:
     }
 
 
-def _trim_history(history: Optional[List[Dict]]) -> List[Dict]:
-    """Keep only last 4 turns, strip metadata."""
-    if not history:
-        return []
-    return [
-        {"role": m.get("role", "user"), "text": str(m.get("text", ""))[:300]}
-        for m in history[-4:]
-    ]
+from app.core.history import trim_history as _window_recent_history, build_summary_prefix
 
 
 def _extract_json(raw: str) -> str:
@@ -105,6 +101,50 @@ def _repair_json(s: str) -> str:
     return s
 
 
+def _salvage_truncated(s: str) -> Optional[str]:
+    """
+    Last-resort repair for output truncated mid-stream (the model ran out of
+    its token budget before finishing — common for large designs sent with a
+    full chat history). Walks the text tracking string/bracket state, remembers
+    the last point where a complete array element had just closed, cuts there,
+    and closes whatever brackets were still open. This drops only the one
+    incomplete trailing element instead of failing the whole graph.
+    """
+    stack = []
+    in_string = False
+    escape = False
+    last_safe_cut = None
+
+    for i, ch in enumerate(s):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            # Right after closing a bracket, if the parent is still an open
+            # array, we're at a boundary between array elements — safe to cut.
+            if stack and stack[-1] == "[":
+                last_safe_cut = i + 1
+
+    if last_safe_cut is None or not stack:
+        return None
+
+    closers = {"{": "}", "[": "]"}
+    return s[:last_safe_cut] + "".join(closers[b] for b in reversed(stack))
+
+
 def _safe_parse(raw: str) -> dict:
     """
     Multi-stage JSON parser. Tries increasingly aggressive fixes until one works.
@@ -138,6 +178,16 @@ def _safe_parse(raw: str) -> dict:
     except Exception:
         pass
 
+    # Stage 4: truncation salvage — output was cut off mid-array by the token
+    # budget. Recover whatever complete nodes/edges were emitted rather than
+    # failing the whole draw.
+    salvaged = _salvage_truncated(repaired)
+    if salvaged:
+        try:
+            return json.loads(salvaged)
+        except json.JSONDecodeError:
+            pass
+
     # All stages failed
     raise json.JSONDecodeError(
         f"All parsing stages failed. Raw start: {raw[:100]!r}", raw, 0
@@ -165,9 +215,15 @@ async def generate_design_stream(
     if context:
         payload["knowledge_base_context"] = context
 
-    history = _trim_history(chat_history)
-    if history:
-        payload["history"] = history
+    # Summarize older turns so nothing from a long discussion is lost,
+    # while keeping the most recent turns verbatim for fidelity.
+    summary = build_summary_prefix(chat_history)
+    if summary:
+        payload["earlier_discussion_summary"] = summary["content"]
+
+    recent = _window_recent_history(chat_history)
+    if recent:
+        payload["history"] = recent
 
     summarised = _summarise_design(current_design)
     if summarised:
@@ -203,7 +259,7 @@ async def generate_design_stream(
             api_key=api_key,
             model_name=model_name,
             api_url=api_url,
-            max_tokens=2400,
+            max_tokens=3200,
             stop=[],
             timeout_seconds=60,
         )
@@ -220,12 +276,13 @@ async def generate_design_stream(
             yield f"data: {json.dumps(chunk)}\n\n"
 
         # Try to parse/repair into strict JSON for the client.
-        # If repair succeeds, send the canonical JSON as the final chunk so the UI
-        # can reliably render even when the model emits slightly invalid JSON.
+        # If repair succeeds, send the canonical JSON as a distinct "final" event —
+        # NOT a plain chunk — so the client replaces its accumulated buffer instead
+        # of appending, which would concatenate raw+canonical into invalid JSON.
         try:
             parsed = _safe_parse(full_response)
             canonical = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
-            yield f"data: {json.dumps(canonical)}\n\n"
+            yield f"data: {json.dumps({'final': canonical})}\n\n"
             full_response = canonical
         except Exception:
             # If repair fails, fall back to raw output; client may still recover.

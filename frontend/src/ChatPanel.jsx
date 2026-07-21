@@ -184,6 +184,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
 
   const getChatHistory = () => messages.filter(m => m.id !== 1).slice(-8).map(m => ({ role: m.role, text: m.text }));
 
+  // Draw uses the FULL discussion (not the 8-message window used for normal chat turns)
+  // so the final board reflects every add/remove/change discussed, not just the recent tail.
+  const getFullChatHistory = () => messages.filter(m => m.id !== 1).map(m => ({ role: m.role, text: m.text }));
+
   const generateTitle = (text) => {
     // Truncate at word boundary near 30 chars
     if (text.length <= 30) return text;
@@ -268,7 +272,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       const payload = {
         prompt: "Draw the final confirmed board logic based on our chat history.",
         current_design: stripGraphData(currentNodes, currentEdges),
-        chat_history: getChatHistory(),
+        chat_history: getFullChatHistory(),
         ...llmConfig
       };
 
@@ -288,6 +292,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let fullJson = '';
+      let finalJson = null;
       let lineBuffer = '';
       let tokenCount = 0;
 
@@ -322,7 +327,13 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
               return;
             }
 
-            fullJson += typeof parsedData === 'string' ? parsedData : String(parsedData);
+            if (parsedData && typeof parsedData === 'object' && typeof parsedData.final === 'string') {
+              // Server-repaired canonical JSON — replaces the accumulated buffer,
+              // it does not get appended (it already contains everything so far).
+              finalJson = parsedData.final;
+            } else {
+              fullJson += typeof parsedData === 'string' ? parsedData : String(parsedData);
+            }
           } else {
             fullJson += data;
           }
@@ -344,13 +355,19 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
                 alert(`Draw failed: ${parsedData.error}`);
                 return;
               }
-              fullJson += typeof parsedData === 'string' ? parsedData : String(parsedData);
+              if (parsedData && typeof parsedData === 'object' && typeof parsedData.final === 'string') {
+                finalJson = parsedData.final;
+              } else {
+                fullJson += typeof parsedData === 'string' ? parsedData : String(parsedData);
+              }
             } else {
               fullJson += data;
             }
           }
         }
       }
+
+      if (finalJson !== null) fullJson = finalJson;
 
       const extractJson = (text) => {
         let s = text.replace(/```json/gi, '').replace(/```/g, '').trim();
