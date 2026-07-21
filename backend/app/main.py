@@ -14,9 +14,18 @@ from app.core.llm import stop_ollama as _stop_ollama, close_http_client, _warmup
 from app.core.rag import init_rag
 from contextlib import asynccontextmanager
 import os
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from app.core.limiter import limiter
+
+
+async def _init_rag_background():
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, init_rag)
+    except Exception as e:
+        print(f"RAG initialization failed: {str(e)}")
+        print("App will continue without RAG support")
 
 
 @asynccontextmanager
@@ -26,16 +35,19 @@ async def lifespan(app: FastAPI):
     # This runs in the background — server is ready immediately, warmup finishes
     # within a few seconds behind the scenes.
     asyncio.create_task(_warmup())
-    
+
     # Initialize RAG and Vector DB without blocking event loop
-    # Wrapped in try-catch so app continues even if RAG fails
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, init_rag)
-    except Exception as e:
-        print(f"⚠️  RAG initialization failed: {str(e)}")
-        print("App will continue without RAG support")
-    
+    asyncio.create_task(_init_rag_background())
+
+    if not os.getenv("BACKEND_API_KEY"):
+        if os.getenv("ENVIRONMENT", "development").strip().lower() == "production":
+            raise RuntimeError(
+                "BACKEND_API_KEY is not set. Refusing to start with ENVIRONMENT=production "
+                "and auth disabled on all protected routes. Set BACKEND_API_KEY or unset "
+                "ENVIRONMENT to run without auth in local development."
+            )
+        print("⚠️  WARNING: BACKEND_API_KEY is not set — all protected routes are running with auth DISABLED.")
+
     # Initialize chat database
     await chats.init_db()
     
@@ -49,7 +61,6 @@ async def lifespan(app: FastAPI):
     _stop_ollama()
 
 
-limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="SysAid AI", lifespan=lifespan, default_response_class=ORJSONResponse)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

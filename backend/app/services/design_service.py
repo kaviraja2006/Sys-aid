@@ -4,6 +4,7 @@ Produces a valid React Flow JSON graph from a user description.
 """
 import json
 import re
+import asyncio
 from app.core.llm import call_llm
 from app.core.rag import search_knowledge_async
 from typing import Optional, Dict, Any, List
@@ -155,8 +156,12 @@ async def generate_design_stream(
 
     payload: Dict[str, Any] = {"request": user_prompt}
 
-    # Fetch context from knowledge base (non-blocking)
-    context = await search_knowledge_async(user_prompt, n_results=2)
+    # Fetch context from knowledge base, but do not let vector search dominate
+    # graph generation latency.
+    try:
+        context = await asyncio.wait_for(search_knowledge_async(user_prompt, n_results=2), timeout=1.2)
+    except asyncio.TimeoutError:
+        context = ""
     if context:
         payload["knowledge_base_context"] = context
 
@@ -198,8 +203,9 @@ async def generate_design_stream(
             api_key=api_key,
             model_name=model_name,
             api_url=api_url,
-            max_tokens=2000,
-            stop=[]
+            max_tokens=2400,
+            stop=[],
+            timeout_seconds=60,
         )
         
         async for chunk in stream:

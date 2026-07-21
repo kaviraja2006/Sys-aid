@@ -2,15 +2,54 @@ import os
 import json
 import chromadb
 import shutil
+import hashlib
+import gc
 from chromadb.utils import embedding_functions
+from chromadb.config import Settings
 
-DB_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db")
+DB_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db_v2")
 KNOWLEDGE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "knowledge.json")
+MANIFEST_FILE = os.path.join(DB_DIR, "knowledge_manifest.json")
 
 # Use single global client
 _chroma_client = None
 _collection = None
 _rag_available = False
+_chroma_settings = Settings(anonymized_telemetry=False)
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_manifest() -> dict:
+    try:
+        with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_manifest(file_hash: str, doc_count: int) -> None:
+    os.makedirs(DB_DIR, exist_ok=True)
+    with open(MANIFEST_FILE, "w", encoding="utf-8") as f:
+        json.dump({"knowledge_hash": file_hash, "doc_count": doc_count}, f)
+
+
+def _knowledge_is_current(file_hash: str) -> bool:
+    if not _collection:
+        return False
+    manifest = _load_manifest()
+    if manifest.get("knowledge_hash") != file_hash:
+        return False
+    try:
+        return _collection.count() >= int(manifest.get("doc_count", 0))
+    except Exception:
+        return False
 
 def init_rag():
     """
@@ -23,7 +62,7 @@ def init_rag():
         os.makedirs(os.path.dirname(DB_DIR), exist_ok=True)
         
         # Initialize Persistent Client
-        _chroma_client = chromadb.PersistentClient(path=DB_DIR)
+        _chroma_client = chromadb.PersistentClient(path=DB_DIR, settings=_chroma_settings)
         
         # We use the default embedding function (all-MiniLM-L6-v2) 
         # it is free, offline, and lightweight.
@@ -35,9 +74,13 @@ def init_rag():
         )
         _rag_available = True
     except Exception as e:
-        print(f"[RAG] ⚠️  Failed to initialize ChromaDB: {str(e)}")
+        print(f"[RAG] Failed to initialize ChromaDB: {str(e)}")
         print(f"[RAG] Attempting to reset database...")
         try:
+            _collection = None
+            _chroma_client = None
+            gc.collect()
+
             # If database is corrupted, delete and retry
             if os.path.exists(DB_DIR):
                 shutil.rmtree(DB_DIR)
@@ -45,25 +88,31 @@ def init_rag():
             
             # Retry initialization
             os.makedirs(os.path.dirname(DB_DIR), exist_ok=True)
-            _chroma_client = chromadb.PersistentClient(path=DB_DIR)
+            _chroma_client = chromadb.PersistentClient(path=DB_DIR, settings=_chroma_settings)
             ef = embedding_functions.DefaultEmbeddingFunction()
             _collection = _chroma_client.get_or_create_collection(
                 name="system_design_knowledge",
                 embedding_function=ef
             )
             _rag_available = True
-            print("[RAG] ✓ Database reset successfully")
+            print("[RAG] Database reset successfully")
         except Exception as retry_err:
-            print(f"[RAG] ✗ Failed to reset database: {str(retry_err)}")
+            print(f"[RAG] Failed to reset database: {str(retry_err)}")
             print("[RAG] Continuing without RAG support...")
             _rag_available = False
             _chroma_client = None
             _collection = None
         return
     
-    # Load knowledge base and upsert
+    # Load knowledge base only when it changed. Re-embedding on every restart is
+    # the expensive path that made startup and first requests feel slow.
     if os.path.exists(KNOWLEDGE_FILE):
         try:
+            knowledge_hash = _file_sha256(KNOWLEDGE_FILE)
+            if _knowledge_is_current(knowledge_hash):
+                print("[RAG] Knowledge base unchanged. Using persisted ChromaDB collection.")
+                return
+
             with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             
@@ -88,6 +137,7 @@ def init_rag():
                         metadatas=metadatas,
                         ids=ids
                     )
+                    _save_manifest(knowledge_hash, len(documents))
                     print(f"[RAG] Indexed {len(documents)} chunks from knowledge base.")
             else:
                 print("[RAG] Warning: knowledge.json must be a JSON array of objects.")

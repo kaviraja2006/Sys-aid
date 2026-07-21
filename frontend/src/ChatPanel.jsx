@@ -59,8 +59,16 @@ const generateSessionId = () => Math.random().toString(36).substr(2, 9) + Date.n
 
 let _msgCounter = 100;
 const nextId = () => ++_msgCounter;
+const defaultLlmConfig = { provider: '', api_key: '', model_name: '', api_url: '' };
+const normalizeSavedLlmConfig = (config) => {
+  if (!config) return defaultLlmConfig;
+  if (config.provider === 'ollama' && !config.api_key && !config.api_url && (!config.model_name || config.model_name === 'llama3')) {
+    return defaultLlmConfig;
+  }
+  return { ...defaultLlmConfig, ...config };
+};
 
-export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, currentEdges, onGenerationStart, onGenerationFinish, onGenerationProgress }) {
+export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, currentEdges, onGenerationStart, onGenerationFinish, onGenerationProgress, setLlmConfig: syncLlmConfig }) {
   const [sessionId, setSessionId] = useState(generateSessionId());
   const [sessionTitle, setSessionTitle] = useState('New Architecture');
   const [messages, setMessages] = useState([initialMessage]);
@@ -82,14 +90,16 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   // LLM Settings
   const [showSettings, setShowSettings] = useState(false);
   const [testStatus, setTestStatus] = useState(null);
+  const [testMessage, setTestMessage] = useState('');
   const [llmConfig, setLlmConfig] = useState(() => {
     const saved = localStorage.getItem('sysaid_llm_config');
-    return saved ? JSON.parse(saved) : { provider: 'ollama', api_key: '', model_name: '', api_url: '' };
+    return saved ? normalizeSavedLlmConfig(JSON.parse(saved)) : defaultLlmConfig;
   });
 
   useEffect(() => {
     localStorage.setItem('sysaid_llm_config', JSON.stringify(llmConfig));
-  }, [llmConfig]);
+    syncLlmConfig?.(llmConfig);
+  }, [llmConfig, syncLlmConfig]);
 
   const saveTimeout = useRef(null);
   const messagesEndRef = useRef(null);
@@ -207,7 +217,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': llmConfig.api_key || import.meta.env.VITE_BACKEND_API_KEY || ''
+          'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
         },
         body: JSON.stringify(payload)
       });
@@ -266,7 +276,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': llmConfig.api_key || import.meta.env.VITE_BACKEND_API_KEY || ''
+          'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
         },
         body: JSON.stringify(payload)
       });
@@ -444,13 +454,24 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
 
   const testConnection = async () => {
     setTestStatus('testing');
+    setTestMessage('');
     try {
-      await api.post('/health/llm', llmConfig);
+      const res = await api.post('/health/llm', llmConfig, { timeout: 9000 });
+      if (res.data?.status !== 'ok') {
+        throw new Error(res.data?.message || 'Connection failed');
+      }
       setTestStatus('success');
+      setTestMessage('Connection OK');
     } catch (e) {
+      const detail = e.response?.data?.detail;
+      const message = detail?.message || e.response?.data?.message || e.message || 'Connection failed';
       setTestStatus('error');
+      setTestMessage(message.replace(/^litellm\.[^:]+:\s*/i, '').slice(0, 160));
     }
-    setTimeout(() => setTestStatus(null), 3000);
+    setTimeout(() => {
+      setTestStatus(null);
+      setTestMessage('');
+    }, 6000);
   };
 
   useEffect(() => {
@@ -509,7 +530,8 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
           <div className="flex-1 overflow-y-auto space-y-4 custom-scrollbar text-sm text-gray-300">
             <div className="flex flex-col gap-1.5">
               <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold">Provider</label>
-              <select value={llmConfig.provider} onChange={(e) => setLlmConfig({ ...llmConfig, provider: e.target.value })} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500">
+              <select value={llmConfig.provider} onChange={(e) => setLlmConfig({ ...llmConfig, provider: e.target.value, model_name: '' })} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500">
+                <option value="">Fast backend default</option>
                 <option value="ollama">Ollama (Local / Free)</option>
                 <option value="openai">OpenAI (ChatGPT)</option>
                 <option value="gemini">Google Gemini</option>
@@ -518,7 +540,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
                 <option value="openai-compatible">Custom (OpenAI Compatible)</option>
               </select>
             </div>
-            {llmConfig.provider !== 'ollama' && (
+            {llmConfig.provider && llmConfig.provider !== 'ollama' && (
               <div className="flex flex-col gap-1.5">
                 <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold flex justify-between">
                   API Key
@@ -528,8 +550,8 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
               </div>
             )}
             <div className="flex flex-col gap-1.5">
-              <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold">Model Name {llmConfig.provider === 'ollama' && '(e.g. llama3)'}</label>
-              <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o' : llmConfig.provider === 'gemini' ? 'gemini-1.5-pro' : llmConfig.provider === 'anthropic' ? 'claude-3-5-sonnet-20240620' : llmConfig.provider === 'nvidia' ? 'meta/llama-3.1-405b-instruct' : 'llama3'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
+              <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold">Model Name {llmConfig.provider === 'ollama' && '(e.g. llama3.2:1b)'}</label>
+              <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o-mini' : llmConfig.provider === 'gemini' ? 'gemini-1.5-flash' : llmConfig.provider === 'anthropic' ? 'claude-3-haiku-20240307' : llmConfig.provider === 'nvidia' ? 'meta/llama-3.1-8b-instruct' : llmConfig.provider === 'ollama' ? 'llama3.2:1b' : 'Backend default'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
             </div>
             {(llmConfig.provider === 'openai-compatible' || llmConfig.provider === 'ollama') && (
               <div className="flex flex-col gap-1.5">
@@ -541,6 +563,11 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
               {testStatus === 'testing' ? <RefreshCcw size={14} className="animate-spin text-gray-400" /> : testStatus === 'success' ? <CheckCircle size={14} className="text-emerald-400" /> : testStatus === 'error' ? <AlertTriangle size={14} className="text-red-400" /> : <Sparkles size={14} className="text-blue-400" />}
               {testStatus === 'testing' ? 'Testing...' : testStatus === 'success' ? 'Success' : testStatus === 'error' ? 'Connection Failed' : 'Test Connection'}
             </button>
+            {testMessage && (
+              <p className={`text-xs leading-relaxed ${testStatus === 'error' ? 'text-red-300' : 'text-emerald-300'}`}>
+                {testMessage}
+              </p>
+            )}
             <div className="mt-4 border border-amber-500/20 bg-amber-500/5 text-amber-400/80 p-3 rounded-lg text-xs leading-relaxed flex gap-2">
               <AlertTriangle size={16} className="shrink-0 mt-0.5" />
               <span>Warning: API keys are saved in `localStorage` which is readable by any script on this page. Never use a production key with limits disabled.</span>

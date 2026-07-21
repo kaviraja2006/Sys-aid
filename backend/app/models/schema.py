@@ -7,9 +7,9 @@ class GenerateRequest(BaseModel):
     chat_history: Optional[List[Dict[str, Any]]] = None
     
     # Dynamic LLM Router Settings
-    provider: Optional[str] = "ollama"
+    provider: Optional[str] = ""
     api_key: Optional[str] = ""
-    model_name: Optional[str] = "llama3"
+    model_name: Optional[str] = ""
     api_url: Optional[str] = ""
 
 class Node(BaseModel):
@@ -48,6 +48,12 @@ class SimulationOutput(BaseModel):
 class ImproveRequest(BaseModel):
     design: DesignGraph
     simulation_output: SimulationOutput
+
+    # Dynamic LLM Router Settings
+    provider: Optional[str] = ""
+    api_key: Optional[str] = ""
+    model_name: Optional[str] = ""
+    api_url: Optional[str] = ""
 
 class ChatSession(BaseModel):
     id: str
