@@ -6,6 +6,15 @@ import { useNodesState, useEdgesState, ReactFlowProvider } from '@xyflow/react';
 import dagre from '@dagrejs/dagre';
 import './App.css';
 
+const defaultLlmConfig = { provider: '', api_key: '', model_name: '', api_url: '' };
+const normalizeSavedLlmConfig = (config) => {
+  if (!config) return defaultLlmConfig;
+  if (config.provider === 'ollama' && !config.api_key && !config.api_url && (!config.model_name || config.model_name === 'llama3')) {
+    return defaultLlmConfig;
+  }
+  return { ...defaultLlmConfig, ...config };
+};
+
 // Node Style Definition
 const nodeStyle = {
   background: '#151618',
@@ -80,7 +89,7 @@ function App() {
   const [selectedNode, setSelectedNode] = useState(null);
   const [llmConfig, setLlmConfig] = useState(() => {
     const saved = localStorage.getItem('sysaid_llm_config');
-    return saved ? JSON.parse(saved) : { provider: 'ollama', api_key: '', model_name: '', api_url: '' };
+    return saved ? normalizeSavedLlmConfig(JSON.parse(saved)) : defaultLlmConfig;
   });
 
   const handleGraphUpdate = useCallback((newNodes, newEdges) => {
@@ -139,6 +148,7 @@ function App() {
           isGenerating={isGenerating}
           genTokens={genTokens}
           onNodeSelect={handleNodeSelect}
+          llmConfig={llmConfig}
         />
 
         <NodeDetailSidebar

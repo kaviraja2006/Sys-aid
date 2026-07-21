@@ -90,7 +90,7 @@ Return only this JSON structure (no other text):
         api_key=api_key,
         model_name=model_name,
         api_url=api_url,
-        max_tokens=800,
+        max_tokens=1024,
     )
     
     # Parse the JSON response

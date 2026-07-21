@@ -7,40 +7,38 @@ Improve service — lean prompt, structured input.
 """
 import json
 from app.core.llm import call_llm
+from app.models.schema import ImproveRequest
 
 
-def _compress_design(data: dict) -> dict:
+def _compress_design(req: ImproveRequest) -> dict:
     """
     ✅ Optimization 8 — do backend work, not LLM work.
     Extract only the bottlenecked nodes and minimal edge list.
     The LLM only needs to reason about the problem areas, not the full graph.
     """
-    design = data.get("design", {})
-    sim = data.get("simulation_output", {})
+    sim = req.simulation_output
 
-    overloaded_ids = {
-        b["node_id"] for b in sim.get("bottlenecks", []) if b.get("overloaded")
-    }
+    overloaded_ids = {b.node_id for b in sim.bottlenecks if b.overloaded}
 
     # Only send overloaded nodes; if none, fall back to all nodes (truncated)
-    all_nodes = design.get("nodes", [])
-    relevant = [n for n in all_nodes if n.get("id") in overloaded_ids] or all_nodes[:8]
+    all_nodes = req.design.nodes
+    relevant = [n for n in all_nodes if n.id in overloaded_ids] or all_nodes[:8]
 
     node_summary = [
-        {"id": n["id"], "label": n.get("label", n.get("id")), "limit": n.get("limit")}
+        {"id": n.id, "label": n.label, "limit": n.limit}
         for n in relevant
     ]
 
     return {
         "overloaded_nodes": node_summary,
-        "bottlenecks": sim.get("bottlenecks", []),
-        "system_overloaded": sim.get("overloaded", False),
-        "latency_ms": sim.get("system_latency_estimate_ms", 0),
+        "bottlenecks": [b.dict() for b in sim.bottlenecks],
+        "system_overloaded": sim.overloaded,
+        "latency_ms": sim.system_latency_estimate_ms,
     }
 
 
-async def improve_design(data: dict):
-    compact = _compress_design(data)
+async def improve_design(req: ImproveRequest):
+    compact = _compress_design(req)
 
     # ✅ Optimization 5 — short, action-oriented prompt
     prompt = (
@@ -51,9 +49,9 @@ async def improve_design(data: dict):
 
     response = await call_llm(
         prompt,
-        provider=data.get("provider", "ollama"),
-        api_key=data.get("api_key", ""),
-        model_name=data.get("model_name", ""),
-        api_url=data.get("api_url", ""),
+        provider=req.provider or "ollama",
+        api_key=req.api_key or "",
+        model_name=req.model_name or "",
+        api_url=req.api_url or "",
     )
     return {"improved": response}

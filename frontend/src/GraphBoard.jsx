@@ -20,7 +20,7 @@ import { copyMermaidToClipboard } from './utils/mermaidExport';
 import ReviewPanel from './ReviewPanel';
 import { api } from './config/api';
 
-function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAutoLayout, onGraphUpdate, isGenerating, genTokens, onNodeSelect }) {
+function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAutoLayout, onGraphUpdate, isGenerating, genTokens, onNodeSelect, llmConfig }) {
 
   const [mermaidCopyStatus, setMermaidCopyStatus] = useState(null);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -91,7 +91,7 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
       const response = await api.post('/review', {
         current_design: { nodes, edges },
         prompt: '',
-        provider: 'ollama'
+        ...(llmConfig || {})
       });
       setReviewData(response.data);
       setReviewOpen(true);
@@ -101,7 +101,7 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
     } finally {
       setReviewLoading(false);
     }
-  }, [nodes, edges]);
+  }, [nodes, edges, llmConfig]);
 
   const addManualNode = (type) => {
     const newNode = {

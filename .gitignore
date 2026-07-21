@@ -15,8 +15,10 @@ build/
 venv/
 env/
 
-# Data & DB artifacts — do NOT commit these (large binary files)
+# Data & DB artifacts — do NOT commit these (large binary files, user data)
 backend/app/data/chroma_db/
+backend/app/data/chroma_db_v2/
+backend/app/data/chats/
 backend/app/data/*.sqlite3
 backend/app/data/*.db
 backend/app/data/*.pickle

@@ -1,15 +1,16 @@
-from fastapi import APIRouter, Body, UploadFile, File, Depends
+from fastapi import APIRouter, Body, Request, UploadFile, File, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from app.services.design_service import generate_design_stream
 from app.services.simulation_service import simulate_system
 from app.services.improve_service import improve_design
 from app.services.chat_service import handle_chat_stream
 from app.services.review_service import review_architecture
-from app.models.schema import GenerateRequest
+from app.models.schema import GenerateRequest, SimulationInput, ImproveRequest
 from app.core.cache import response_cache
 from app.core.rag import ingest_document
+from app.core.llm import call_llm, HEALTH_TIMEOUT_SECONDS
 from app.core.security import get_api_key
-import litellm
+from app.core.limiter import limiter
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 
@@ -22,7 +23,8 @@ _SSE_HEADERS = {
 
 
 @router.post("/chat")
-async def chat_endpoint(req: GenerateRequest):
+@limiter.limit("10/minute")
+async def chat_endpoint(request: Request, req: GenerateRequest):
     return StreamingResponse(
         handle_chat_stream(req.prompt, req.chat_history, req),
         media_type="text/event-stream",
@@ -31,7 +33,8 @@ async def chat_endpoint(req: GenerateRequest):
 
 
 @router.post("/generate-board")
-async def generate_board_endpoint(req: GenerateRequest):
+@limiter.limit("10/minute")
+async def generate_board_endpoint(request: Request, req: GenerateRequest):
     from app.services.design_service import generate_design_stream
     return StreamingResponse(
         generate_design_stream(req.prompt, req.current_design, req.chat_history, req),
@@ -41,17 +44,19 @@ async def generate_board_endpoint(req: GenerateRequest):
 
 
 @router.post("/simulate")
-async def simulate(data: dict):
-    return simulate_system(data)
+async def simulate(req: SimulationInput):
+    return simulate_system(req)
 
 
 @router.post("/improve")
-async def improve(data: dict):
-    return await improve_design(data)
+@limiter.limit("10/minute")
+async def improve(request: Request, req: ImproveRequest):
+    return await improve_design(req)
 
 
 @router.post("/review")
-async def review(req: GenerateRequest):
+@limiter.limit("10/minute")
+async def review(request: Request, req: GenerateRequest):
     """Review an architecture design and return scores + improvement suggestions."""
     nodes = req.current_design.get("nodes", []) if req.current_design else []
     edges = req.current_design.get("edges", []) if req.current_design else []
@@ -99,28 +104,29 @@ async def health_llm(req: dict = Body(...)):
     model_name = req.get("model_name", "")
     api_url = req.get("api_url", "")
     try:
-        if provider == "ollama":
-            model = f"ollama/{model_name or 'llama3'}"
-        else:
-            model = f"{provider}/{model_name}"
-            
-        kwargs = {
-            "model": model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "api_key": api_key or "dummy-key",
-            "max_tokens": 1
-        }
-        if api_url:
-            kwargs["api_base"] = api_url
-            
-        await litellm.acompletion(**kwargs)
+        await call_llm(
+            "ping",
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name,
+            api_url=api_url,
+            max_tokens=1,
+            timeout_seconds=HEALTH_TIMEOUT_SECONDS,
+            use_cache=False,
+        )
         return {"status": "ok"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=502, detail={"status": "error", "message": str(e)})
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
 
 @router.post("/upload-knowledge")
-async def upload_knowledge(file: UploadFile = File(...)):
-    content = await file.read()
+@limiter.limit("10/minute")
+async def upload_knowledge(request: Request, file: UploadFile = File(...)):
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 5 MB)")
     text = content.decode('utf-8', errors='ignore')
     ingest_document(text, file.filename)
     return {"status": "success", "filename": file.filename}

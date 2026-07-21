@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { X, Loader } from 'lucide-react';
-import { api, API_URL } from './config/api';
+import { API_URL } from './config/api';
 
 const annotationTypeMap = {
   risk: { icon: '🔴', label: 'Risk', color: 'bg-red-500/20 text-red-400 border-red-500/30' },
@@ -26,13 +26,22 @@ export default function NodeDetailSidebar({ node, isOpen, onClose, llmConfig }) 
     if (!node) return;
     setAnalysisLoading(true);
     try {
-      const response = await api.post('/chat', {
+      const payload = {
         prompt: `Analyze this architecture component and provide a brief technical analysis.\n\nComponent:\nName: ${node.data?.label || 'Unknown'}\nType: ${node.data?.systemType || 'default'}\nDescription: ${node.data?.description || 'No description'}`,
         chat_history: [],
         ...llmConfig
+      };
+
+      const response = await fetch(`${API_URL}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
+        },
+        body: JSON.stringify(payload)
       });
 
-      if (!response.ok) throw new Error('Failed to analyze');
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();

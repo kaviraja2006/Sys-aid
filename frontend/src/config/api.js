@@ -13,6 +13,7 @@ const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY || '';
 
 const api = axios.create({
   baseURL: API_URL,
+  withCredentials: true,
   headers: {
       'X-API-Key': BACKEND_API_KEY
   }
