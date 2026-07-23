@@ -5,6 +5,7 @@ class GenerateRequest(BaseModel):
     prompt: str = Field(..., max_length=4000)
     current_design: Optional[Dict[str, Any]] = None
     chat_history: Optional[List[Dict[str, Any]]] = None
+    documentation: Optional[str] = Field(default=None, max_length=20000)
     
     # Dynamic LLM Router Settings
     provider: Optional[str] = ""

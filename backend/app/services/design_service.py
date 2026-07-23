@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any, List
 #  • Be explicit: "valid JSON only", "no markdown", "no explanation"
 #  • Keep it short — fewer input tokens = faster response
 _SYSTEM = (
-    'You are a system architecture expert. '
+    'You are a system architecture expert designing production-grade architecture diagrams. '
     'Respond with ONLY a single valid JSON object — no markdown, no explanation, no code fences. '
     'The JSON must have exactly two keys: "nodes" and "edges". '
     'Each node: {"id":"string","type":"archNode","data":{"label":"string","description":"string","systemType":"string"}} '
@@ -23,11 +23,92 @@ _SYSTEM = (
     'Each edge: {"id":"string","source":"nodeId","target":"nodeId","label":"string","type":"smoothstep","animated":true} '
     'Every node must be connected via at least one edge. '
     'Edge source and target must exactly match existing node ids. '
+    'Rules for a clean, real architecture (violating these produces an unusable diagram): '
+    '(1) Every node label and description must be specific to the system being designed — '
+    'never use a generic placeholder like "Node", "Component", or "Item". '
+    '(2) Never create a node that only represents a connection or relationship between two other '
+    'nodes (a "join" or "link" node) — express relationships as edges only, not as extra nodes. '
+    '(3) Between any two nodes, draw at most ONE edge. Do not add a reverse edge duplicating '
+    'a relationship already expressed (e.g. if A -> B is drawn, do not also draw B -> A) — '
+    'if the interaction is bidirectional, say so in the single edge label instead. '
+    '(4) Keep the graph as small and precise as the request calls for — do not pad it with '
+    'redundant or filler nodes just to look more complete. '
     'The chat history is a running discussion where the user may add, remove, or revise '
     'components over several turns — always resolve to the LATEST decision on each point, '
     'not earlier ones that were later changed or rejected. '
+    'If an "architecture_documentation" field is present in the request, it is the FINALIZED, '
+    'authoritative description of the system — the diagram you produce and that documentation '
+    'must describe the exact same architecture. Create exactly one node for every distinct '
+    'system, service, or component explicitly named in architecture_documentation — no fewer, '
+    'and do not invent extra components that are not named there. Every relationship, data flow, '
+    'or communication path described in architecture_documentation must be represented by an edge, '
+    'and every edge you draw must correspond to something described there — do not add relationships '
+    'the documentation does not mention. Use the same names for components as the documentation uses. '
     'Output raw JSON only. First character must be "{".'
 )
+
+_REPAIR_SYSTEM = (
+    'You are fixing a system architecture diagram (JSON graph of nodes/edges) so it fully matches '
+    'its authoritative documentation. You will be given the current graph and a list of components '
+    'named in the documentation that are missing from the graph. '
+    'Respond with ONLY a single valid JSON object with the same shape as the input graph — keys '
+    '"nodes" and "edges" — containing the COMPLETE graph: all original nodes/edges UNCHANGED, plus '
+    'new nodes for each missing component and new edges connecting each new node into the existing '
+    'graph based on how the documentation describes it relating to other components. '
+    'Each node: {"id":"string","type":"archNode","data":{"label":"string","description":"string","systemType":"string"}} '
+    'systemType must be one of: database, server, client, cloud, cache, default. '
+    'Each edge: {"id":"string","source":"nodeId","target":"nodeId","label":"string","type":"smoothstep","animated":true} '
+    'Do not remove or rename any existing node or edge. '
+    'Output raw JSON only. First character must be "{".'
+)
+
+_PLACEHOLDER_LABELS = {"", "node", "component", "item", "new node", "untitled", "n/a"}
+
+
+def _clean_graph(parsed: dict) -> dict:
+    """
+    Strip low-quality output the model sometimes produces despite the prompt:
+    placeholder/empty-label nodes (often synthetic "join" nodes standing in for
+    an edge) and duplicate reverse edges between the same pair of nodes.
+    Runs BEFORE _ensure_connected so orphans created by this cleanup still get
+    reattached.
+    """
+    try:
+        nodes = parsed.get("nodes")
+        edges = parsed.get("edges")
+        if not isinstance(nodes, list):
+            return parsed
+        if not isinstance(edges, list):
+            edges = []
+
+        def label_of(n):
+            return str(n.get("data", {}).get("label", "")).strip().lower() if isinstance(n, dict) else ""
+
+        kept_nodes = [
+            n for n in nodes
+            if isinstance(n, dict) and n.get("id") and label_of(n) not in _PLACEHOLDER_LABELS
+        ]
+        kept_ids = {n["id"] for n in kept_nodes}
+
+        deduped_edges = []
+        seen_pairs = set()
+        for e in edges:
+            if not isinstance(e, dict):
+                continue
+            src, tgt = e.get("source"), e.get("target")
+            if src not in kept_ids or tgt not in kept_ids or src == tgt:
+                continue
+            pair = frozenset((src, tgt))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            deduped_edges.append(e)
+
+        parsed["nodes"] = kept_nodes
+        parsed["edges"] = deduped_edges
+        return parsed
+    except Exception:
+        return parsed
 
 def _summarise_design(design: Optional[Dict[str, Any]]) -> Optional[Dict]:
     """Send only ids + labels of existing nodes — not the full node objects."""
@@ -194,11 +275,157 @@ def _safe_parse(raw: str) -> dict:
     )
 
 
+def _ensure_connected(parsed: dict) -> dict:
+    """
+    Guarantee every node ends up connected, even if the model dropped edges
+    entirely (e.g. token-budget truncation cut the "edges" array before it
+    started) or ChatPanel-side validation would otherwise filter out edges
+    with mismatched ids. The system prompt already asks the model for this;
+    this enforces it server-side so the frontend never receives a graph that
+    dagre can only lay out as a disconnected single row.
+
+    Orphan nodes are attached to the first node (treated as the hub/root),
+    producing a star/tree shape in the worst case rather than a flat queue.
+    """
+    try:
+        nodes = parsed.get("nodes")
+        edges = parsed.get("edges")
+        if not isinstance(nodes, list) or not nodes:
+            return parsed
+        if not isinstance(edges, list):
+            edges = []
+
+        node_ids = {n["id"] for n in nodes if isinstance(n, dict) and n.get("id")}
+        if len(node_ids) < 2:
+            parsed["edges"] = edges
+            return parsed
+
+        # Drop edges that don't reference real nodes.
+        valid_edges = [
+            e for e in edges
+            if isinstance(e, dict) and e.get("source") in node_ids and e.get("target") in node_ids
+        ]
+
+        connected = {e["source"] for e in valid_edges} | {e["target"] for e in valid_edges}
+
+        root_id = nodes[0].get("id")
+        for n in nodes:
+            node_id = n.get("id") if isinstance(n, dict) else None
+            if not node_id or node_id == root_id or node_id in connected:
+                continue
+            valid_edges.append({
+                "id": f"auto-{node_id}",
+                "source": root_id,
+                "target": node_id,
+                "type": "smoothstep",
+                "animated": True,
+            })
+
+        parsed["edges"] = valid_edges
+        return parsed
+    except Exception:
+        return parsed
+
+
+_DOC_COMPONENT_PATTERNS = [
+    re.compile(r"\*\*([A-Z][A-Za-z0-9 /&\-]{1,40}?)\*\*"),        # **Bold Term**
+    re.compile(r"^#{1,4}\s+([A-Z][A-Za-z0-9 /&\-]{1,40})\s*$", re.MULTILINE),  # ## Heading
+    re.compile(r"^\s*[-*]\s+([A-Z][A-Za-z0-9 /&\-]{1,40}?)\s*[:—-]", re.MULTILINE),  # - Term: ...
+]
+
+_DOC_STOPWORDS = {
+    "overview", "summary", "architecture", "introduction", "conclusion",
+    "components", "design", "system", "diagram", "flow", "notes",
+}
+
+
+def _extract_doc_components(doc: str) -> List[str]:
+    """Pull candidate component/service names out of the documentation markdown
+    (bold terms, headings, bullet-leading terms) for reconciliation against the
+    generated diagram. Best-effort heuristic — false negatives are fine, the
+    goal is just to catch obviously-named components the model dropped."""
+    if not doc:
+        return []
+    found = []
+    seen = set()
+    for pattern in _DOC_COMPONENT_PATTERNS:
+        for m in pattern.finditer(doc):
+            name = m.group(1).strip()
+            key = name.lower()
+            if not name or key in _DOC_STOPWORDS or key in seen or len(name) < 2:
+                continue
+            seen.add(key)
+            found.append(name)
+    return found
+
+
+def _normalise(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _find_missing_components(doc_components: List[str], nodes: List[dict]) -> List[str]:
+    node_labels = [
+        _normalise(str(n.get("data", {}).get("label", "")))
+        for n in nodes if isinstance(n, dict)
+    ]
+    missing = []
+    for comp in doc_components:
+        norm = _normalise(comp)
+        if not norm:
+            continue
+        if any(norm in nl or nl in norm for nl in node_labels if nl):
+            continue
+        missing.append(comp)
+    return missing
+
+
+async def _repair_missing_components(
+    parsed: dict,
+    documentation: str,
+    missing: List[str],
+    provider: str,
+    model_name: str,
+    api_key: str,
+    api_url: str,
+) -> dict:
+    """One corrective LLM pass: add nodes/edges for components the first pass
+    dropped, without touching what's already there. Falls back to the
+    unmodified graph on any failure — this is a best-effort sync step, not a
+    hard dependency for the draw to succeed."""
+    from app.core.llm import call_llm
+
+    repair_payload = {
+        "current_graph": {"nodes": parsed.get("nodes", []), "edges": parsed.get("edges", [])},
+        "architecture_documentation": documentation,
+        "missing_components": missing,
+    }
+    try:
+        raw = await call_llm(
+            json.dumps(repair_payload, separators=(",", ":")),
+            system_prompt=_REPAIR_SYSTEM,
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name,
+            api_url=api_url,
+            max_tokens=4096,
+            timeout_seconds=30,
+        )
+        repaired = _safe_parse(raw)
+        repaired = _clean_graph(repaired)
+        repaired = _ensure_connected(repaired)
+        if isinstance(repaired.get("nodes"), list) and len(repaired["nodes"]) >= len(parsed.get("nodes", [])):
+            return repaired
+    except Exception:
+        pass
+    return parsed
+
+
 async def generate_design_stream(
     user_prompt: str,
     current_design: Optional[Dict[str, Any]] = None,
     chat_history: Optional[List[Dict[str, str]]] = None,
     req_config: Any = None,
+    documentation: Optional[str] = None,
 ):
     from app.core.llm import call_llm_stream
     from app.core.cache import response_cache
@@ -232,6 +459,14 @@ async def generate_design_stream(
     else:
         payload["instruction"] = "Create a new design graph."
 
+    documentation = (documentation or "").strip()
+    if documentation:
+        payload["architecture_documentation"] = documentation
+        payload["instruction"] = (
+            "Generate the diagram strictly from architecture_documentation so both are identical. "
+            + payload["instruction"]
+        )
+
     prompt_text = json.dumps(payload, separators=(",", ":"))
 
     provider = req_config.provider if req_config else "ollama"
@@ -259,7 +494,7 @@ async def generate_design_stream(
             api_key=api_key,
             model_name=model_name,
             api_url=api_url,
-            max_tokens=3200,
+            max_tokens=4096,
             stop=[],
             timeout_seconds=60,
         )
@@ -281,6 +516,20 @@ async def generate_design_stream(
         # of appending, which would concatenate raw+canonical into invalid JSON.
         try:
             parsed = _safe_parse(full_response)
+            parsed = _clean_graph(parsed)
+            parsed = _ensure_connected(parsed)
+
+            # Validate the diagram covers every component the documentation names.
+            # If the model dropped any, run one corrective pass so the diagram and
+            # the documentation stay in sync instead of silently diverging.
+            if documentation:
+                doc_components = _extract_doc_components(documentation)
+                missing = _find_missing_components(doc_components, parsed.get("nodes", []))
+                if missing:
+                    parsed = await _repair_missing_components(
+                        parsed, documentation, missing, provider, model_name, api_key, api_url
+                    )
+
             canonical = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
             yield f"data: {json.dumps({'final': canonical})}\n\n"
             full_response = canonical

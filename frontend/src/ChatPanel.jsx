@@ -188,6 +188,14 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   // so the final board reflects every add/remove/change discussed, not just the recent tail.
   const getFullChatHistory = () => messages.filter(m => m.id !== 1).map(m => ({ role: m.role, text: m.text }));
 
+  // The most recent AI response is treated as the finalized architecture
+  // idea/documentation — the diagram must be generated from exactly this text
+  // so the two never drift apart.
+  const getLatestDocumentation = () => {
+    const aiMessages = messages.filter(m => m.id !== 1 && m.role === 'ai' && m.text?.trim());
+    return aiMessages.length ? aiMessages[aiMessages.length - 1].text : '';
+  };
+
   const generateTitle = (text) => {
     // Truncate at word boundary near 30 chars
     if (text.length <= 30) return text;
@@ -273,6 +281,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
         prompt: "Draw the final confirmed board logic based on our chat history.",
         current_design: stripGraphData(currentNodes, currentEdges),
         chat_history: getFullChatHistory(),
+        documentation: getLatestDocumentation(),
         ...llmConfig
       };
 

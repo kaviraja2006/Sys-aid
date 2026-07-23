@@ -56,12 +56,17 @@ async def get_client_id(request: Request, response: Response) -> str:
 
     if not client_id:
         client_id = secrets.token_urlsafe(24)
+        is_https = request.url.scheme == "https"
         response.set_cookie(
             key=CLIENT_ID_COOKIE,
             value=_make_cookie_value(client_id),
             httponly=True,
-            samesite="none",
-            secure=request.url.scheme == "https",
+            # SameSite=None cookies are rejected by browsers unless Secure is
+            # also set, so on plain HTTP (local dev) we must fall back to Lax
+            # or the cookie is silently dropped and a new client_id is minted
+            # on every request — breaking chat history persistence entirely.
+            samesite="none" if is_https else "lax",
+            secure=is_https,
             max_age=60 * 60 * 24 * 365,
         )
 
