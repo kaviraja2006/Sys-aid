@@ -8,7 +8,9 @@ const isLocalHost =
     window.location.hostname === '127.0.0.1');
 const API_URL =
   import.meta.env.VITE_API_URL ||
-  (isLocalHost ? 'http://127.0.0.1:8000' : PROD_FALLBACK_API_URL);
+  // Match whatever hostname the page was actually opened on (localhost vs
+  // 127.0.0.1) so the backend's client-id cookie is same-site and gets sent.
+  (isLocalHost ? `http://${window.location.hostname}:8000` : PROD_FALLBACK_API_URL);
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY || '';
 
 const api = axios.create({

@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 import chromadb
 import shutil
 import hashlib
@@ -11,10 +12,18 @@ DB_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db_v2")
 KNOWLEDGE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "knowledge.json")
 MANIFEST_FILE = os.path.join(DB_DIR, "knowledge_manifest.json")
 
+# RAG loads an ONNX embedding model (all-MiniLM-L6-v2) plus onnxruntime into
+# memory. On memory-constrained deployments (e.g. Render's 512Mi free tier)
+# that alone can be enough to OOM the process. Default OFF so a deploy boots
+# cleanly; opt in by setting RAG_ENABLED=true where memory allows it.
+RAG_ENABLED = os.getenv("RAG_ENABLED", "false").strip().lower() == "true"
+
 # Use single global client
 _chroma_client = None
 _collection = None
 _rag_available = False
+_init_lock = threading.Lock()
+_init_attempted = False
 _chroma_settings = Settings(anonymized_telemetry=False)
 
 
@@ -51,13 +60,34 @@ def _knowledge_is_current(file_hash: str) -> bool:
     except Exception:
         return False
 
-def init_rag():
+def ensure_rag_initialized():
+    """
+    Lazily initialize RAG on first actual use (a search or ingest call),
+    instead of at server startup. This keeps startup memory low enough to
+    pass health checks on constrained hosts, and skips the ONNX model
+    download/load entirely when RAG_ENABLED is not set.
+    """
+    global _init_attempted
+
+    if not RAG_ENABLED:
+        return
+    if _init_attempted:
+        return
+
+    with _init_lock:
+        if _init_attempted:
+            return
+        _init_attempted = True
+        _init_rag_impl()
+
+
+def _init_rag_impl():
     """
     Initialize RAG system with graceful fallback.
     If ChromaDB fails, RAG is disabled but app continues to work.
     """
     global _chroma_client, _collection, _rag_available
-    
+
     try:
         os.makedirs(os.path.dirname(DB_DIR), exist_ok=True)
         
@@ -148,6 +178,7 @@ def init_rag():
 
 def search_knowledge(query_text: str, n_results: int = 3) -> str:
     """Queries the vector database and returns a formatted context string."""
+    ensure_rag_initialized()
     if not _collection:
         return ""
         
@@ -197,6 +228,7 @@ async def search_knowledge_async(query_text: str, n_results: int = 3) -> str:
 
 def ingest_document(text: str, filename: str):
     """Chunks and ingests a custom document into ChromaDB."""
+    ensure_rag_initialized()
     if not _collection:
         return
         

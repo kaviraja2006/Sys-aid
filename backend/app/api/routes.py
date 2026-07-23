@@ -37,7 +37,7 @@ async def chat_endpoint(request: Request, req: GenerateRequest):
 async def generate_board_endpoint(request: Request, req: GenerateRequest):
     from app.services.design_service import generate_design_stream
     return StreamingResponse(
-        generate_design_stream(req.prompt, req.current_design, req.chat_history, req),
+        generate_design_stream(req.prompt, req.current_design, req.chat_history, req, req.documentation),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )

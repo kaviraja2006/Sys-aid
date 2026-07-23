@@ -11,21 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from app.api import routes, chats
 from app.core.llm import stop_ollama as _stop_ollama, close_http_client, _warmup
-from app.core.rag import init_rag
+from app.core.rag import RAG_ENABLED
 from contextlib import asynccontextmanager
 import os
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.core.limiter import limiter
-
-
-async def _init_rag_background():
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, init_rag)
-    except Exception as e:
-        print(f"RAG initialization failed: {str(e)}")
-        print("App will continue without RAG support")
 
 
 @asynccontextmanager
@@ -36,8 +27,12 @@ async def lifespan(app: FastAPI):
     # within a few seconds behind the scenes.
     asyncio.create_task(_warmup())
 
-    # Initialize RAG and Vector DB without blocking event loop
-    asyncio.create_task(_init_rag_background())
+    # RAG (ChromaDB + the ONNX embedding model) is NOT initialized here.
+    # Loading the embedding model costs real memory, so it's deferred until
+    # the first search/ingest call actually needs it (see app.core.rag),
+    # and only runs at all when RAG_ENABLED=true.
+    if not RAG_ENABLED:
+        print("RAG disabled (set RAG_ENABLED=true to enable). Skipping embedding model load.")
 
     if not os.getenv("BACKEND_API_KEY"):
         if os.getenv("ENVIRONMENT", "development").strip().lower() == "production":
@@ -46,12 +41,12 @@ async def lifespan(app: FastAPI):
                 "and auth disabled on all protected routes. Set BACKEND_API_KEY or unset "
                 "ENVIRONMENT to run without auth in local development."
             )
-        print("⚠️  WARNING: BACKEND_API_KEY is not set — all protected routes are running with auth DISABLED.")
+        print("WARNING: BACKEND_API_KEY is not set - all protected routes are running with auth DISABLED.")
 
     # Initialize chat database
     await chats.init_db()
     
-    print("SysAid AI: server ready. LLM pre-warm and RAG initialized in background...")
+    print("SysAid AI: server ready. LLM pre-warm running in background...")
 
     yield  # ← app runs here
 
