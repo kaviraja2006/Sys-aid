@@ -9,9 +9,10 @@ if sys.platform != "win32":
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
-from app.api import routes, chats
+from app.api import routes, chats, auth_routes
 from app.core.llm import stop_ollama as _stop_ollama, close_http_client, _warmup
 from app.core.rag import RAG_ENABLED
+from app.core.db import init_models
 from contextlib import asynccontextmanager
 import os
 from slowapi import _rate_limit_exceeded_handler
@@ -43,8 +44,8 @@ async def lifespan(app: FastAPI):
             )
         print("WARNING: BACKEND_API_KEY is not set - all protected routes are running with auth DISABLED.")
 
-    # Initialize chat database
-    await chats.init_db()
+    # Initialize Postgres tables (users, sessions, chat_sessions)
+    await init_models()
     
     print("SysAid AI: server ready. LLM pre-warm running in background...")
 
@@ -79,6 +80,7 @@ app.add_middleware(
 
 app.include_router(routes.router)
 app.include_router(chats.router, prefix="/chats")
+app.include_router(auth_routes.router, prefix="/auth")
 
 
 @app.get("/")

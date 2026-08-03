@@ -7,5 +7,9 @@ litellm==1.72.0
 python-multipart==0.0.20
 chromadb==0.6.3
 slowapi==0.1.9
-aiosqlite==0.20.0
 uvloop==0.21.0; sys_platform != "win32"
+sqlalchemy[asyncio]==2.0.51
+asyncpg==0.31.0
+redis==8.1.0
+google-auth==2.56.2
+itsdangerous==2.2.0
