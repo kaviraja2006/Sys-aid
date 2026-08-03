@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { Send, Bot, User, Sparkles, RefreshCcw, ChevronLeft, ChevronRight, History, X, PenTool, Settings, Trash2, Search, CheckCircle, AlertTriangle } from 'lucide-react';
 import { api, API_URL } from './config/api';
+import { secureGet, secureSet } from './utils/secureStorage';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -91,13 +92,24 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   const [showSettings, setShowSettings] = useState(false);
   const [testStatus, setTestStatus] = useState(null);
   const [testMessage, setTestMessage] = useState('');
-  const [llmConfig, setLlmConfig] = useState(() => {
-    const saved = localStorage.getItem('sysaid_llm_config');
-    return saved ? normalizeSavedLlmConfig(JSON.parse(saved)) : defaultLlmConfig;
-  });
+  const [llmConfig, setLlmConfig] = useState(defaultLlmConfig);
+  const llmConfigLoaded = useRef(false);
+
+  // Load the encrypted config once on mount. Loading is async (Web Crypto /
+  // IndexedDB), so the settings form briefly shows defaults until this resolves.
+  useEffect(() => {
+    let cancelled = false;
+    secureGet('sysaid_llm_config').then((saved) => {
+      if (cancelled) return;
+      llmConfigLoaded.current = true;
+      if (saved) setLlmConfig(normalizeSavedLlmConfig(saved));
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem('sysaid_llm_config', JSON.stringify(llmConfig));
+    if (!llmConfigLoaded.current) return; // don't clobber saved config with defaults pre-load
+    secureSet('sysaid_llm_config', llmConfig);
     syncLlmConfig?.(llmConfig);
   }, [llmConfig, syncLlmConfig]);
 
@@ -114,24 +126,36 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   });
 
 
+  // Persists a session immediately, bypassing the debounce below. Accepts
+  // overrides for nodes/edges/messages/session id/title so callers that just
+  // produced fresh data (e.g. drawBoard right after generating a graph, or a
+  // session switch flushing the outgoing session) don't have to wait for
+  // props/state to catch up on the next render.
+  const persistSession = async (overrides = {}) => {
+    if (!isAuthenticated) return;
+    const payloadMessages = overrides.messages ?? messages;
+    if (payloadMessages.length <= 1) return;
+    try {
+      await api.post('/chats/', {
+        id: overrides.sessionId ?? sessionId,
+        title: overrides.sessionTitle ?? sessionTitle,
+        updated_at: new Date().toISOString(),
+        messages: payloadMessages,
+        nodes: overrides.nodes ?? currentNodes,
+        edges: overrides.edges ?? currentEdges
+      });
+    } catch (err) {
+      console.error("Failed to save", err);
+    }
+  };
+
   useEffect(() => {
     if (messages.length <= 1) return;
     if (!isAuthenticated) return;
     if (saveTimeout.current) clearTimeout(saveTimeout.current);
-    saveTimeout.current = setTimeout(async () => {
+    saveTimeout.current = setTimeout(() => {
       if (loading || drawing) return;
-      try {
-        await api.post('/chats/', {
-          id: sessionId,
-          title: sessionTitle,
-          updated_at: new Date().toISOString(),
-          messages,
-          nodes: currentNodes,
-          edges: currentEdges
-        });
-      } catch (err) {
-        console.error("Failed to save", err);
-      }
+      persistSession();
     }, 5000);
     return () => clearTimeout(saveTimeout.current);
   }, [messages, currentNodes, currentEdges, sessionId, sessionTitle, loading, drawing, isAuthenticated]);
@@ -150,6 +174,13 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   };
 
   const handleLoadSession = async (id) => {
+    // Flush any pending autosave for the session we're leaving — otherwise a
+    // board drawn in the last 5s gets cancelled by the effect cleanup below
+    // and is never written to the DB before we switch away from it.
+    if (saveTimeout.current) {
+      clearTimeout(saveTimeout.current);
+      await persistSession();
+    }
     setLoading(true);
     try {
       const res = await api.get(`/chats/${id}`);
@@ -178,6 +209,12 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   };
 
   const handleResetChat = () => {
+    // Same flush as handleLoadSession — don't lose an unsaved board when
+    // starting a fresh session.
+    if (saveTimeout.current) {
+      clearTimeout(saveTimeout.current);
+      persistSession();
+    }
     setSessionId(generateSessionId());
     setSessionTitle('New Architecture');
     setMessages([initialMessage]);
@@ -455,6 +492,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
               target: e.target || ''
             })).filter(e => e.source && e.target);
             onGraphUpdate(safeNodes, safeEdges);
+            // Save immediately — don't rely on the 5s debounce, which can be
+            // cancelled if the user switches chats right after drawing.
+            if (saveTimeout.current) clearTimeout(saveTimeout.current);
+            persistSession({ nodes: safeNodes, edges: safeEdges });
           } else {
             throw new Error('Payload did not contain nodes array');
           }
@@ -598,7 +639,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
             )}
             <div className="mt-4 border border-amber-500/20 bg-amber-500/5 text-amber-400/80 p-3 rounded-lg text-xs leading-relaxed flex gap-2">
               <AlertTriangle size={16} className="shrink-0 mt-0.5" />
-              <span>Warning: API keys are saved in `localStorage` which is readable by any script on this page. Never use a production key with limits disabled.</span>
+              <span>Your API key is encrypted at rest in this browser (AES-GCM, key never leaves the browser's secure storage). It is still decrypted in memory to make requests, so never use a production key with limits disabled.</span>
             </div>
           </div>
         </div>
