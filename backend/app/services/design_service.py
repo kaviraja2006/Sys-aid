@@ -33,6 +33,24 @@ _SYSTEM = (
     'if the interaction is bidirectional, say so in the single edge label instead. '
     '(4) Keep the graph as small and precise as the request calls for — do not pad it with '
     'redundant or filler nodes just to look more complete. '
+    '(5) Do not draw redundant parallel paths to the same destination: if a component such as a '
+    'Load Balancer already fronts a downstream service, ALL upstream traffic to that service must '
+    'flow only through it — never also draw a direct edge that bypasses it. '
+    '(6) When a request asks you to add a new capability (e.g. AI, search, analytics, logging) to a '
+    'system that has explicit privacy or end-to-end-encryption guarantees, you must pick ONE explicit, '
+    'consistent privacy model for that capability and represent only that path — for example either '
+    '"processing happens client-side before encryption" or "the server only ever receives already-'
+    'encrypted or derived data". Never draw both a client-side and a server-side variant of the same '
+    'processing step side by side without being asked to compare them, and never wire a shared raw-data '
+    'path (e.g. a message queue carrying plaintext payloads) directly into a new consuming service '
+    'unless the existing design already establishes that this service is authorized to see that data — '
+    'doing so silently implies the server automatically receives plaintext it should never see. '
+    '(7) If "existing_design" is present in the request, you are EXTENDING an existing diagram, not '
+    'redesigning it: every existing node (same id, label, systemType) and every existing edge (same '
+    'source, target, and meaning as its label describes) must be reproduced exactly as given, unless '
+    'the user\'s request explicitly asks to change that specific node or edge. Add only the new nodes '
+    'and edges needed for the request — never omit, rename, merge, or re-route a part of the diagram '
+    'the request did not ask you to touch. '
     'The chat history is a running discussion where the user may add, remove, or revise '
     'components over several turns — always resolve to the LATEST decision on each point, '
     'not earlier ones that were later changed or rejected. '
@@ -111,16 +129,29 @@ def _clean_graph(parsed: dict) -> dict:
         return parsed
 
 def _summarise_design(design: Optional[Dict[str, Any]]) -> Optional[Dict]:
-    """Send only ids + labels of existing nodes — not the full node objects."""
+    """
+    Compact but semantically complete summary of the existing diagram for the
+    prompt — ids/labels/types so the model knows what already exists and,
+    critically, edge labels so it knows what each existing connection *means*
+    and can reproduce it deliberately instead of guessing/reinventing it.
+    """
     if not design or not design.get("nodes"):
         return None
     return {
         "nodes": [
-            {"id": n["id"], "label": n.get("data", {}).get("label", "")}
+            {
+                "id": n["id"],
+                "label": n.get("data", {}).get("label", ""),
+                "systemType": n.get("data", {}).get("systemType", ""),
+            }
             for n in design["nodes"]
         ],
         "edges": [
-            {"src": e["source"], "tgt": e["target"]}
+            {
+                "src": e["source"],
+                "tgt": e["target"],
+                "label": e.get("label", ""),
+            }
             for e in design.get("edges", [])
         ],
     }
@@ -150,11 +181,55 @@ def _extract_json(raw: str) -> str:
     return s
 
 
+def _fix_unescaped_quotes(s: str) -> str:
+    """
+    Repair unescaped double-quotes inside JSON string values — a common LLM
+    slip, e.g. writing "the "push" service" instead of "the \\"push\\" service".
+    A literal quote is treated as string content (and escaped) unless it looks
+    like an actual string terminator: followed by optional whitespace then a
+    JSON structural character (, : } ]) or end of input. Left uncorrected,
+    a single stray quote desyncs string-boundary tracking for every parser
+    downstream, including the truncation-salvage stage.
+    """
+    out = []
+    in_string = False
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "\\" and in_string:
+            out.append(ch)
+            if i + 1 < n:
+                out.append(s[i + 1])
+            i += 2
+            continue
+        if ch == '"':
+            if not in_string:
+                in_string = True
+                out.append(ch)
+            else:
+                j = i + 1
+                while j < n and s[j] in " \t\r\n":
+                    j += 1
+                if j >= n or s[j] in ",:}]":
+                    in_string = False
+                    out.append(ch)
+                else:
+                    out.append('\\"')
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _repair_json(s: str) -> str:
     """
     Apply targeted repairs to common LLM JSON failures.
     Run AFTER extraction, BEFORE json.loads().
     """
+    s = _fix_unescaped_quotes(s)
+
     # Remove JS single-line and block comments
     s = re.sub(r"//[^\n]*", "", s)
     s = re.sub(r"/\*.*?\*/", "", s, flags=re.DOTALL)
@@ -195,6 +270,7 @@ def _salvage_truncated(s: str) -> Optional[str]:
     in_string = False
     escape = False
     last_safe_cut = None
+    last_safe_stack = None
 
     for i, ch in enumerate(s):
         if escape:
@@ -216,14 +292,18 @@ def _salvage_truncated(s: str) -> Optional[str]:
                 stack.pop()
             # Right after closing a bracket, if the parent is still an open
             # array, we're at a boundary between array elements — safe to cut.
+            # Snapshot the stack *at this point*, not at end-of-loop: anything
+            # opened after this cut (e.g. a subsequent, still-incomplete
+            # element) must not be closed in the salvaged output.
             if stack and stack[-1] == "[":
                 last_safe_cut = i + 1
+                last_safe_stack = list(stack)
 
-    if last_safe_cut is None or not stack:
+    if last_safe_cut is None:
         return None
 
     closers = {"{": "}", "[": "]"}
-    return s[:last_safe_cut] + "".join(closers[b] for b in reversed(stack))
+    return s[:last_safe_cut] + "".join(closers[b] for b in reversed(last_safe_stack))
 
 
 def _safe_parse(raw: str) -> dict:
@@ -327,6 +407,59 @@ def _ensure_connected(parsed: dict) -> dict:
         return parsed
 
 
+def _merge_preserve_existing(original: Optional[Dict[str, Any]], parsed: dict) -> dict:
+    """
+    Safety net for incremental updates (a request against an existing
+    design). The system prompt already instructs the model to reproduce
+    every existing node/edge unchanged and only add what was asked for, but
+    that's a request, not a guarantee — on a big regeneration (e.g. adding
+    an unrelated AI/search subsystem) the model can still silently drop or
+    reroute part of the original diagram it wasn't supposed to touch.
+
+    This makes that structurally impossible: anything present in the
+    original design that the model's output no longer contains is
+    re-appended unchanged. Anything the model kept, changed, or added is
+    left exactly as the model produced it — this only ever ADDS back
+    accidentally-dropped nodes/edges, it never overrides an intentional edit.
+    """
+    if not original or not isinstance(original.get("nodes"), list):
+        return parsed
+    try:
+        new_nodes = parsed.get("nodes")
+        new_edges = parsed.get("edges")
+        if not isinstance(new_nodes, list):
+            return parsed
+        if not isinstance(new_edges, list):
+            new_edges = []
+
+        new_node_ids = {n.get("id") for n in new_nodes if isinstance(n, dict)}
+        for n in original["nodes"]:
+            if isinstance(n, dict) and n.get("id") and n["id"] not in new_node_ids:
+                new_nodes.append(n)
+                new_node_ids.add(n["id"])
+
+        new_edge_pairs = {
+            (e.get("source"), e.get("target"))
+            for e in new_edges if isinstance(e, dict)
+        }
+        for e in original.get("edges", []) or []:
+            if not isinstance(e, dict):
+                continue
+            pair = (e.get("source"), e.get("target"))
+            # Only restore if both endpoints are still present in the merged
+            # graph — an endpoint the model deliberately removed shouldn't
+            # get a dangling edge resurrected for it.
+            if pair not in new_edge_pairs and pair[0] in new_node_ids and pair[1] in new_node_ids:
+                new_edges.append(e)
+                new_edge_pairs.add(pair)
+
+        parsed["nodes"] = new_nodes
+        parsed["edges"] = new_edges
+        return parsed
+    except Exception:
+        return parsed
+
+
 _DOC_COMPONENT_PATTERNS = [
     re.compile(r"\*\*([A-Z][A-Za-z0-9 /&\-]{1,40}?)\*\*"),        # **Bold Term**
     re.compile(r"^#{1,4}\s+([A-Z][A-Za-z0-9 /&\-]{1,40})\s*$", re.MULTILINE),  # ## Heading
@@ -407,7 +540,7 @@ async def _repair_missing_components(
             api_key=api_key,
             model_name=model_name,
             api_url=api_url,
-            max_tokens=4096,
+            max_tokens=8192,
             timeout_seconds=30,
         )
         repaired = _safe_parse(raw)
@@ -455,7 +588,11 @@ async def generate_design_stream(
     summarised = _summarise_design(current_design)
     if summarised:
         payload["existing_design"] = summarised
-        payload["instruction"] = "Update existing design. Keep node ids. Apply changes only."
+        payload["instruction"] = (
+            "Update existing design. Keep node ids. Apply changes only: reproduce every node and "
+            "edge in existing_design exactly as given, and add only the new nodes/edges this request "
+            "needs — do not omit, rename, or re-route anything existing_design already contains."
+        )
     else:
         payload["instruction"] = "Create a new design graph."
 
@@ -494,7 +631,7 @@ async def generate_design_stream(
             api_key=api_key,
             model_name=model_name,
             api_url=api_url,
-            max_tokens=4096,
+            max_tokens=8192,
             stop=[],
             timeout_seconds=60,
         )
@@ -516,6 +653,7 @@ async def generate_design_stream(
         # of appending, which would concatenate raw+canonical into invalid JSON.
         try:
             parsed = _safe_parse(full_response)
+            parsed = _merge_preserve_existing(current_design, parsed)
             parsed = _clean_graph(parsed)
             parsed = _ensure_connected(parsed)
 

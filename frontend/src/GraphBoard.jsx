@@ -156,6 +156,14 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
         />
         <Background variant="dots" gap={20} size={1.5} color="#1F2023" />
 
+        <ReviewPanel
+          isOpen={reviewOpen}
+          scores={reviewData?.scores}
+          suggestions={reviewData?.suggestions}
+          feedback={reviewData?.overall_feedback}
+          onClose={() => setReviewOpen(false)}
+        />
+
         {isGenerating && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/40 pointer-events-none">
             <div className="bg-[#151618] border border-[#2c2d31] rounded-xl p-6 text-center backdrop-blur-md shadow-xl">

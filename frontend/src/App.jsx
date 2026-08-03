@@ -10,13 +10,6 @@ import dagre from '@dagrejs/dagre';
 import './App.css';
 
 const defaultLlmConfig = { provider: '', api_key: '', model_name: '', api_url: '' };
-const normalizeSavedLlmConfig = (config) => {
-  if (!config) return defaultLlmConfig;
-  if (config.provider === 'ollama' && !config.api_key && !config.api_url && (!config.model_name || config.model_name === 'llama3')) {
-    return defaultLlmConfig;
-  }
-  return { ...defaultLlmConfig, ...config };
-};
 
 // Node Style Definition
 const nodeStyle = {
@@ -91,10 +84,9 @@ function App() {
   const [genTokens, setGenTokens] = useState(0);
   const [selectedNode, setSelectedNode] = useState(null);
   const { user, setUser, loading: authLoading, logout } = useAuth();
-  const [llmConfig, setLlmConfig] = useState(() => {
-    const saved = localStorage.getItem('sysaid_llm_config');
-    return saved ? normalizeSavedLlmConfig(JSON.parse(saved)) : defaultLlmConfig;
-  });
+  // ChatPanel owns the encrypted, persisted copy of this config and pushes
+  // it up via setLlmConfig once it's loaded (see secureGet in ChatPanel.jsx).
+  const [llmConfig, setLlmConfig] = useState(defaultLlmConfig);
 
   const handleGraphUpdate = useCallback((newNodes, newEdges) => {
     if (!newNodes || newNodes.length === 0) {
