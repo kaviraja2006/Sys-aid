@@ -68,7 +68,7 @@ const normalizeSavedLlmConfig = (config) => {
   return { ...defaultLlmConfig, ...config };
 };
 
-export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, currentEdges, onGenerationStart, onGenerationFinish, onGenerationProgress, setLlmConfig: syncLlmConfig }) {
+export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, currentEdges, onGenerationStart, onGenerationFinish, onGenerationProgress, setLlmConfig: syncLlmConfig, isAuthenticated }) {
   const [sessionId, setSessionId] = useState(generateSessionId());
   const [sessionTitle, setSessionTitle] = useState('New Architecture');
   const [messages, setMessages] = useState([initialMessage]);
@@ -116,6 +116,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
 
   useEffect(() => {
     if (messages.length <= 1) return;
+    if (!isAuthenticated) return;
     if (saveTimeout.current) clearTimeout(saveTimeout.current);
     saveTimeout.current = setTimeout(async () => {
       if (loading || drawing) return;
@@ -133,9 +134,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       }
     }, 5000);
     return () => clearTimeout(saveTimeout.current);
-  }, [messages, currentNodes, currentEdges, sessionId, sessionTitle, loading, drawing]);
+  }, [messages, currentNodes, currentEdges, sessionId, sessionTitle, loading, drawing, isAuthenticated]);
 
   const loadHistoryList = async () => {
+    if (!isAuthenticated) return;
     setHistoryLoading(true);
     try {
       const res = await api.get('/chats/');

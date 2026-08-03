@@ -533,9 +533,9 @@ async def generate_design_stream(
             canonical = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
             yield f"data: {json.dumps({'final': canonical})}\n\n"
             full_response = canonical
-        except Exception:
+        except Exception as e:
             # If repair fails, fall back to raw output; client may still recover.
-            pass
+            print(f"[design_service] _safe_parse failed: {e}\nRaw response (first 500 chars): {full_response[:500]!r}")
 
         # End of stream marker
         yield "data: [DONE]\n\n"

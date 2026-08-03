@@ -2,6 +2,9 @@ import { useState, useCallback } from 'react';
 import ChatPanel from './ChatPanel';
 import GraphBoard from './GraphBoard';
 import NodeDetailSidebar from './NodeDetailSidebar';
+import TopBar from './TopBar';
+import LoginPage from './LoginPage';
+import useAuth from './useAuth';
 import { useNodesState, useEdgesState, ReactFlowProvider } from '@xyflow/react';
 import dagre from '@dagrejs/dagre';
 import './App.css';
@@ -87,6 +90,7 @@ function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [genTokens, setGenTokens] = useState(0);
   const [selectedNode, setSelectedNode] = useState(null);
+  const { user, setUser, loading: authLoading, logout } = useAuth();
   const [llmConfig, setLlmConfig] = useState(() => {
     const saved = localStorage.getItem('sysaid_llm_config');
     return saved ? normalizeSavedLlmConfig(JSON.parse(saved)) : defaultLlmConfig;
@@ -123,10 +127,30 @@ function App() {
     setSelectedNode(node);
   }, []);
 
+  const handleLogout = useCallback(async () => {
+    await logout();
+    handleReset();
+  }, [logout, handleReset]);
+
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center w-full h-screen bg-[#050b1a]">
+        <div className="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginPage setUser={setUser} />;
+  }
+
   return (
     <ReactFlowProvider>
-      <div className="flex w-full h-screen overflow-hidden bg-background font-sans text-gray-100">
+      <div className="flex flex-col w-full h-screen overflow-hidden bg-background font-sans text-gray-100">
+      <TopBar user={user} onLogout={handleLogout} />
+      <div className="flex flex-1 overflow-hidden">
         <ChatPanel
+          key={user.id}
           onGraphUpdate={handleGraphUpdate}
           onReset={handleReset}
           currentNodes={nodes}
@@ -135,6 +159,7 @@ function App() {
           onGenerationFinish={() => { setIsGenerating(false); setGenTokens(0); }}
           onGenerationProgress={(count) => setGenTokens(count)}
           setLlmConfig={setLlmConfig}
+          isAuthenticated={!!user}
         />
 
         <GraphBoard
@@ -157,6 +182,7 @@ function App() {
           onClose={() => setSelectedNode(null)}
           llmConfig={llmConfig}
         />
+      </div>
       </div>
     </ReactFlowProvider>
   );

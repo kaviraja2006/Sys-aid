@@ -37,7 +37,7 @@ async def handle_chat_stream(
             api_key=req_config.api_key if req_config else "",
             model_name=req_config.model_name if req_config else "",
             api_url=req_config.api_url if req_config else "",
-            max_tokens=1536,  # High enough that a normal answer finishes on its own, not novels
+            max_tokens=3072,  # High enough that a detailed architecture write-up finishes on its own
         ):
             # Format as Server-Sent Event with JSON escaping to preserve newlines
             yield f"data: {json.dumps(chunk)}\n\n"
