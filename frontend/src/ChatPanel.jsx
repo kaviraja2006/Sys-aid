@@ -126,24 +126,36 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   });
 
 
+  // Persists a session immediately, bypassing the debounce below. Accepts
+  // overrides for nodes/edges/messages/session id/title so callers that just
+  // produced fresh data (e.g. drawBoard right after generating a graph, or a
+  // session switch flushing the outgoing session) don't have to wait for
+  // props/state to catch up on the next render.
+  const persistSession = async (overrides = {}) => {
+    if (!isAuthenticated) return;
+    const payloadMessages = overrides.messages ?? messages;
+    if (payloadMessages.length <= 1) return;
+    try {
+      await api.post('/chats/', {
+        id: overrides.sessionId ?? sessionId,
+        title: overrides.sessionTitle ?? sessionTitle,
+        updated_at: new Date().toISOString(),
+        messages: payloadMessages,
+        nodes: overrides.nodes ?? currentNodes,
+        edges: overrides.edges ?? currentEdges
+      });
+    } catch (err) {
+      console.error("Failed to save", err);
+    }
+  };
+
   useEffect(() => {
     if (messages.length <= 1) return;
     if (!isAuthenticated) return;
     if (saveTimeout.current) clearTimeout(saveTimeout.current);
-    saveTimeout.current = setTimeout(async () => {
+    saveTimeout.current = setTimeout(() => {
       if (loading || drawing) return;
-      try {
-        await api.post('/chats/', {
-          id: sessionId,
-          title: sessionTitle,
-          updated_at: new Date().toISOString(),
-          messages,
-          nodes: currentNodes,
-          edges: currentEdges
-        });
-      } catch (err) {
-        console.error("Failed to save", err);
-      }
+      persistSession();
     }, 5000);
     return () => clearTimeout(saveTimeout.current);
   }, [messages, currentNodes, currentEdges, sessionId, sessionTitle, loading, drawing, isAuthenticated]);
@@ -162,6 +174,13 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   };
 
   const handleLoadSession = async (id) => {
+    // Flush any pending autosave for the session we're leaving — otherwise a
+    // board drawn in the last 5s gets cancelled by the effect cleanup below
+    // and is never written to the DB before we switch away from it.
+    if (saveTimeout.current) {
+      clearTimeout(saveTimeout.current);
+      await persistSession();
+    }
     setLoading(true);
     try {
       const res = await api.get(`/chats/${id}`);
@@ -190,6 +209,12 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   };
 
   const handleResetChat = () => {
+    // Same flush as handleLoadSession — don't lose an unsaved board when
+    // starting a fresh session.
+    if (saveTimeout.current) {
+      clearTimeout(saveTimeout.current);
+      persistSession();
+    }
     setSessionId(generateSessionId());
     setSessionTitle('New Architecture');
     setMessages([initialMessage]);
@@ -467,6 +492,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
               target: e.target || ''
             })).filter(e => e.source && e.target);
             onGraphUpdate(safeNodes, safeEdges);
+            // Save immediately — don't rely on the 5s debounce, which can be
+            // cancelled if the user switches chats right after drawing.
+            if (saveTimeout.current) clearTimeout(saveTimeout.current);
+            persistSession({ nodes: safeNodes, edges: safeEdges });
           } else {
             throw new Error('Payload did not contain nodes array');
           }
