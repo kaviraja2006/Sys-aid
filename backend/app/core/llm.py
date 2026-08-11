@@ -49,7 +49,10 @@ SLOW_MODEL_ALIASES = {
 
 CHAT_TIMEOUT_SECONDS = float(os.getenv("LLM_CHAT_TIMEOUT_SECONDS", "30"))
 GENERATE_TIMEOUT_SECONDS = float(os.getenv("LLM_GENERATE_TIMEOUT_SECONDS", "60"))
-HEALTH_TIMEOUT_SECONDS = float(os.getenv("LLM_HEALTH_TIMEOUT_SECONDS", "8"))
+HEALTH_TIMEOUT_SECONDS = float(os.getenv("LLM_HEALTH_TIMEOUT_SECONDS", "25"))
+# Below this, a slow-but-alive connection is treated as normal; past it we
+# start warning the caller the model just needs more time (see routes.py).
+HEALTH_WARN_AFTER_SECONDS = float(os.getenv("LLM_HEALTH_WARN_AFTER_SECONDS", "8"))
 PLACEHOLDER_KEY_PREFIXES = ("your_", "replace_", "dummy", "test")
 
 # ── 2. Shared persistent httpx client — one SSL handshake, keep-alive pool ──
