@@ -11,7 +11,7 @@ import {
   getNodesBounds,
   getViewportForBounds
 } from '@xyflow/react';
-import { LayoutGrid, Download, Plus, RefreshCcw, Copy, CheckCircle, Sparkles, Loader } from 'lucide-react';
+import { LayoutGrid, Download, Plus, RefreshCcw, Copy, CheckCircle, Sparkles, Loader, Locate } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import '@xyflow/react/dist/style.css';
 import ArchitectureNode from './ArchitectureNode';
@@ -41,7 +41,13 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
   );
 
   const reactFlowWrapper = useRef(null);
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
+
+  // "Retrace" — recenters/refits the whole board back into view at a sane
+  // default zoom, regardless of how far the user has panned or zoomed away.
+  const handleRetrace = useCallback(() => {
+    fitView({ padding: 0.2, duration: 400, maxZoom: 1 });
+  }, [fitView]);
 
   const handleExport = useCallback(() => {
     if (nodes.length === 0) return;
@@ -132,6 +138,8 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
         selectionOnDrag={true}
         panOnDrag={[1]}
         fitView
+        minZoom={0.02}
+        maxZoom={8}
         proOptions={{ hideAttribution: true }}
         style={{ width: '100%', height: '100%' }}
       >
@@ -178,6 +186,9 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
           <div className="flex justify-between items-center w-full">
             <h3 className="text-[13px] font-semibold text-gray-100 uppercase tracking-wider mb-1">Architecture Graph</h3>
             <div className="flex gap-2">
+              <button onClick={handleRetrace} disabled={nodes.length === 0} className="p-1.5 hover:bg-[#1f2023] rounded text-gray-400 hover:text-emerald-400 disabled:opacity-50" title="Retrace — recenter the board in view">
+                <Locate size={14} />
+              </button>
               <button onClick={handleReviewArchitecture} disabled={nodes.length === 0 || reviewLoading} className="p-1.5 hover:bg-[#1f2023] rounded text-gray-400 hover:text-purple-400 disabled:opacity-50" title="Review Architecture">
                 {reviewLoading ? <RefreshCcw size={14} className="animate-spin" /> : <Sparkles size={14} />}
               </button>
@@ -233,6 +244,18 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
             >
               <LayoutGrid size={14} />
               ✨ Auto-Layout
+            </button>
+
+            {/* Retrace Button — snaps the camera back to fit the whole board,
+                for when the user has panned/zoomed the design out of view */}
+            <button
+              onClick={handleRetrace}
+              disabled={nodes.length === 0}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-500/20 rounded-lg text-[12px] font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Recenter the board in view"
+            >
+              <Locate size={14} />
+              Retrace
             </button>
 
             {/* Status Indicator */}

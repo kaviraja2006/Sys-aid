@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
-import { Send, Bot, User, Sparkles, RefreshCcw, ChevronLeft, ChevronRight, History, X, PenTool, Settings, Trash2, Search, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Send, Bot, User, Sparkles, RefreshCcw, ChevronLeft, ChevronRight, History, X, PenTool, Settings, Trash2, Search, CheckCircle, AlertTriangle, Mic, MicOff } from 'lucide-react';
 import { api, API_URL } from './config/api';
 import { secureGet, secureSet } from './utils/secureStorage';
+import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -76,6 +77,28 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
   const [drawing, setDrawing] = useState(false);
+
+  const inputTextareaRef = useRef(null);
+
+  // Voice input — free, browser-native Web Speech API (Chrome/Edge/Opera/Brave only).
+  // baseTextRef holds whatever was already in the textarea before this listening
+  // session started, so live speech is layered on top of it (and each update
+  // replaces the in-progress words in place instead of appending duplicates).
+  const baseTextRef = useRef('');
+  const speech = useSpeechRecognition({
+    onTranscript: (liveText) =>
+      setInputValue(baseTextRef.current ? `${baseTextRef.current} ${liveText}` : liveText),
+  });
+
+  // Auto-grow the input textarea with its content (typed or spoken) instead of
+  // staying pinned to one row and scrolling long text out of view.
+  const MAX_INPUT_HEIGHT = 260;
+  useEffect(() => {
+    const el = inputTextareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_HEIGHT)}px`;
+  }, [inputValue]);
 
   // UX logic
   const [width, setWidth] = useState(380);
@@ -248,6 +271,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     if (e) e.preventDefault();
     const textToSend = textOverride || inputValue;
     if (!textToSend.trim() || loading || drawing) return;
+    if (speech.isListening) speech.stop();
 
     if (messages.length === 1) setSessionTitle(generateTitle(textToSend));
 
@@ -313,6 +337,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
 
   const drawBoard = async () => {
     if (loading || drawing) return;
+    if (speech.isListening) speech.stop();
     setDrawing(true);
 
     try {
@@ -524,14 +549,22 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   const testConnection = async () => {
     setTestStatus('testing');
     setTestMessage('');
+    // Under 8s is the normal case. Past that, the model is still alive but
+    // slow to respond (cold start / a heavier model) — let the user know
+    // we're still waiting instead of going straight to an error.
+    const slowNoticeTimer = setTimeout(() => {
+      setTestMessage('This model needs extra time to connect, please wait…');
+    }, 8000);
     try {
-      const res = await api.post('/health/llm', llmConfig, { timeout: 9000 });
+      const res = await api.post('/health/llm', llmConfig, { timeout: 26000 });
       if (res.data?.status !== 'ok') {
         throw new Error(res.data?.message || 'Connection failed');
       }
+      clearTimeout(slowNoticeTimer);
       setTestStatus('success');
       setTestMessage('Connection OK');
     } catch (e) {
+      clearTimeout(slowNoticeTimer);
       const detail = e.response?.data?.detail;
       const message = detail?.message || e.response?.data?.message || e.message || 'Connection failed';
       setTestStatus('error');
@@ -633,7 +666,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
               {testStatus === 'testing' ? 'Testing...' : testStatus === 'success' ? 'Success' : testStatus === 'error' ? 'Connection Failed' : 'Test Connection'}
             </button>
             {testMessage && (
-              <p className={`text-xs leading-relaxed ${testStatus === 'error' ? 'text-red-300' : 'text-emerald-300'}`}>
+              <p className={`text-xs leading-relaxed ${testStatus === 'error' ? 'text-red-300' : testStatus === 'testing' ? 'text-amber-300' : 'text-emerald-300'}`}>
                 {testMessage}
               </p>
             )}
@@ -646,11 +679,11 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       )}
 
       {/* Header */}
-      <div className="p-4 xl:p-5 border-b border-[#1f2023] flex flex-col bg-gradient-to-b from-[#111112] to-transparent shrink-0 space-y-4">
+      <div className="p-4 xl:p-5 border-b border-[#1f2023] flex flex-col bg-gradient-to-b from-[#111112] to-transparent shrink-0 space-y-4 shadow-sm">
         <div className="flex items-center justify-between">
           <h2 className="font-semibold text-sm xl:text-[15px] flex items-center gap-2 text-white truncate">
             <div className="bg-blue-500/10 p-1.5 rounded-lg border border-blue-500/20"><Sparkles size={16} className="text-blue-400" /></div>
-            SysAid Architect
+            <span>SysAid Architect</span>
           </h2>
           <div className="flex items-center gap-2 shrink-0">
             <button onClick={() => setShowSettings(true)} className="p-1.5 rounded-md text-gray-400 hover:text-blue-400 hover:bg-blue-500/10"><Settings size={16} /></button>
@@ -698,8 +731,16 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
           </button>
         )}
 
-        <form onSubmit={handleSend} className="relative flex items-center">
+        {speech.error && (
+          <p className="flex items-center gap-1.5 text-[11px] text-amber-400 -mb-1">
+            <AlertTriangle size={12} />
+            {speech.error}
+          </p>
+        )}
+
+        <form onSubmit={handleSend} className="relative flex items-end">
           <textarea
+            ref={inputTextareaRef}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={(e) => {
@@ -711,14 +752,35 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
                 handleSend(e);
               }
             }}
-            placeholder="Discuss architecture... (Ctrl+Enter to Draw Board)"
+            placeholder={speech.isListening ? 'Listening...' : 'Discuss architecture... (Ctrl+Enter to Draw Board)'}
             disabled={loading || drawing}
             rows="1"
-            style={{ resize: 'none' }}
-            className="w-full bg-[#151618] border border-[#2c2d31] focus:border-blue-500/50 rounded-xl py-3 pl-4 pr-12 text-[13px] text-gray-200 placeholder-gray-500 shadow-inner disabled:opacity-50 outline-none custom-scrollbar"
+            style={{ resize: 'none', maxHeight: `${MAX_INPUT_HEIGHT}px`, overflowY: 'auto' }}
+            className={`w-full bg-[#151618] border rounded-xl py-3 pl-4 text-[13px] leading-relaxed text-gray-200 placeholder-gray-500 shadow-inner disabled:opacity-50 outline-none custom-scrollbar transition-[height,border-color] duration-150 ${speech.isSupported ? 'pr-20' : 'pr-12'} ${speech.isListening ? 'border-red-500/50' : 'border-[#2c2d31] focus:border-blue-500/50'}`}
           />
-          <button type="submit" disabled={!inputValue.trim() || loading || drawing} className="absolute right-1.5 p-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 transition-all"><Send size={14} className="ml-0.5" /></button>
+          {speech.isSupported && (
+            <button
+              type="button"
+              title={speech.isListening ? 'Stop recording' : 'Speak your idea'}
+              onClick={() => {
+                if (speech.isListening) {
+                  speech.stop();
+                } else {
+                  baseTextRef.current = inputValue.trim();
+                  speech.start();
+                }
+              }}
+              disabled={loading || drawing}
+              className={`absolute right-9 bottom-2 p-1.5 rounded-lg transition-all disabled:opacity-40 ${speech.isListening ? 'bg-red-600/20 text-red-400 border border-red-500/40 animate-pulse' : 'bg-[#1f2023] text-gray-400 hover:text-gray-200 border border-[#2c2d31]'}`}
+            >
+              {speech.isListening ? <MicOff size={14} /> : <Mic size={14} />}
+            </button>
+          )}
+          <button type="submit" disabled={!inputValue.trim() || loading || drawing} className="absolute right-1.5 bottom-2 p-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 transition-all"><Send size={14} className="ml-0.5" /></button>
         </form>
+        <p className="text-[10.5px] text-gray-600 px-1 -mt-1.5 select-none">
+          <kbd className="px-1 py-0.5 rounded bg-[#1a1b1e] border border-[#2c2d31] text-gray-500">Enter</kbd> to send &nbsp;·&nbsp; <kbd className="px-1 py-0.5 rounded bg-[#1a1b1e] border border-[#2c2d31] text-gray-500">Shift+Enter</kbd> new line &nbsp;·&nbsp; <kbd className="px-1 py-0.5 rounded bg-[#1a1b1e] border border-[#2c2d31] text-gray-500">Ctrl+Enter</kbd> draw board
+        </p>
       </div>
 
     </div>
