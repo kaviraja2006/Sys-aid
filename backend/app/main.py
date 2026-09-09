@@ -1,6 +1,7 @@
-import sys
 import asyncio
 import logging
+import sys
+
 if sys.platform != "win32":
     try:
         import uvloop
@@ -9,21 +10,25 @@ if sys.platform != "win32":
         pass
 
 from app.core.logging_config import setup_logging
+
 setup_logging()  # before any other app module has a chance to log anything
+
+import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
-from app.api import routes, chats, auth_routes
-from app.core.llm import stop_ollama as _stop_ollama, close_http_client, _warmup
-from app.core.rag import RAG_ENABLED
-from app.core.db import init_models
-from app.core.auth import cleanup_expired_sessions
-from contextlib import asynccontextmanager
-import os
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+
+from app.api import auth_routes, chats, routes
+from app.core.auth import cleanup_expired_sessions
+from app.core.db import init_models
 from app.core.limiter import limiter
+from app.core.llm import _warmup, close_http_client
+from app.core.llm import stop_ollama as _stop_ollama
+from app.core.rag import RAG_ENABLED
 
 logger = logging.getLogger(__name__)
 

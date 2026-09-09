@@ -33,6 +33,7 @@ def test_app_boots_and_health_check_is_public():
     driver mismatch that only shows up against real Postgres surfaces
     right here, before this ever reaches a deploy)."""
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     with TestClient(app) as client:
@@ -43,6 +44,7 @@ def test_app_boots_and_health_check_is_public():
 
 def test_auth_me_requires_a_session():
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     with TestClient(app) as client:
@@ -54,8 +56,8 @@ def test_session_hash_lookup_round_trip():
     """Creates a real user + session against Postgres, then confirms the
     session is looked up correctly and stored hashed, never as the raw
     bearer token — the property auth.py's hashing rollout depends on."""
+    from app.core.auth import _hash_token, _lookup_session, create_session
     from app.core.db import async_session_maker
-    from app.core.auth import create_session, _lookup_session, _hash_token
     from app.models.db_models import User
 
     async def _run():
@@ -82,9 +84,10 @@ def test_cleanup_expired_sessions_deletes_expired_rows():
     """Exercises cleanup_expired_sessions() (main.py's background sweep)
     against a real expired row, confirming both the query and the schema
     it depends on (sessions.expires_at) are correct."""
+    from app.core.auth import _hash_token, cleanup_expired_sessions
     from app.core.db import async_session_maker
-    from app.core.auth import cleanup_expired_sessions, _hash_token
-    from app.models.db_models import User, Session as DbSession
+    from app.models.db_models import Session as DbSession
+    from app.models.db_models import User
 
     async def _run():
         async with async_session_maker() as db:
