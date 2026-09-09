@@ -1,11 +1,16 @@
 import sys
 import asyncio
+import logging
 if sys.platform != "win32":
     try:
         import uvloop
         uvloop.install()
     except ImportError:
         pass
+
+from app.core.logging_config import setup_logging
+setup_logging()  # before any other app module has a chance to log anything
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
@@ -20,6 +25,8 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.core.limiter import limiter
 
+logger = logging.getLogger(__name__)
+
 SESSION_CLEANUP_INTERVAL_SECONDS = float(os.getenv("SESSION_CLEANUP_INTERVAL_SECONDS", str(6 * 60 * 60)))
 
 
@@ -32,11 +39,11 @@ async def _session_cleanup_loop():
             await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
             deleted = await cleanup_expired_sessions()
             if deleted:
-                print(f"[session cleanup] Deleted {deleted} expired session(s).")
+                logger.info("Deleted %d expired session(s).", deleted)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[session cleanup] Sweep failed (will retry next interval): {e}")
+            logger.error("Session cleanup sweep failed (will retry next interval): %s", e)
 
 
 @asynccontextmanager
@@ -52,7 +59,7 @@ async def lifespan(app: FastAPI):
     # the first search/ingest call actually needs it (see app.core.rag),
     # and only runs at all when RAG_ENABLED=true.
     if not RAG_ENABLED:
-        print("RAG disabled (set RAG_ENABLED=true to enable). Skipping embedding model load.")
+        logger.info("RAG disabled (set RAG_ENABLED=true to enable). Skipping embedding model load.")
 
     if not os.getenv("BACKEND_API_KEY"):
         if os.getenv("ENVIRONMENT", "development").strip().lower() == "production":
@@ -61,19 +68,19 @@ async def lifespan(app: FastAPI):
                 "and auth disabled on all protected routes. Set BACKEND_API_KEY or unset "
                 "ENVIRONMENT to run without auth in local development."
             )
-        print("WARNING: BACKEND_API_KEY is not set - all protected routes are running with auth DISABLED.")
+        logger.warning("BACKEND_API_KEY is not set - all protected routes are running with auth DISABLED.")
 
     # Initialize Postgres tables (users, sessions, chat_sessions)
     await init_models()
 
     session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
 
-    print("SysAid AI: server ready. LLM pre-warm running in background...")
+    logger.info("SysAid AI: server ready. LLM pre-warm running in background...")
 
     yield  # ← app runs here
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
-    print("Shutting down — closing HTTP pool and any local LLM processes...")
+    logger.info("Shutting down — closing HTTP pool and any local LLM processes...")
     session_cleanup_task.cancel()
     try:
         await session_cleanup_task

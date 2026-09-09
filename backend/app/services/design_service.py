@@ -3,11 +3,14 @@ Generate-board service.
 Produces a valid React Flow JSON graph from a user description.
 """
 import json
+import logging
 import re
 import asyncio
 from app.core.llm import call_llm
 from app.core.rag import search_knowledge_async
 from typing import Optional, Dict, Any, List
+
+logger = logging.getLogger(__name__)
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 # Rules:
@@ -683,7 +686,9 @@ async def generate_design_stream(
             parse_succeeded = True
         except Exception as e:
             # If repair fails, fall back to raw output; client may still recover.
-            print(f"[design_service] _safe_parse failed: {e}\nRaw response (first 500 chars): {full_response[:500]!r}")
+            logger.warning(
+                "_safe_parse failed: %s\nRaw response (first 500 chars): %r", e, full_response[:500]
+            )
 
         # End of stream marker
         yield "data: [DONE]\n\n"

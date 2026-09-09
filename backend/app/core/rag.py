@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import threading
 import chromadb
 import shutil
@@ -7,6 +8,8 @@ import hashlib
 import gc
 from chromadb.utils import embedding_functions
 from chromadb.config import Settings
+
+logger = logging.getLogger(__name__)
 
 DB_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db_v2")
 KNOWLEDGE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "knowledge.json")
@@ -104,8 +107,8 @@ def _init_rag_impl():
         )
         _rag_available = True
     except Exception as e:
-        print(f"[RAG] Failed to initialize ChromaDB: {str(e)}")
-        print(f"[RAG] Attempting to reset database...")
+        logger.error("Failed to initialize ChromaDB: %s", e)
+        logger.info("Attempting to reset database...")
         try:
             _collection = None
             _chroma_client = None
@@ -114,8 +117,8 @@ def _init_rag_impl():
             # If database is corrupted, delete and retry
             if os.path.exists(DB_DIR):
                 shutil.rmtree(DB_DIR)
-                print(f"[RAG] Deleted corrupted database at {DB_DIR}")
-            
+                logger.info("Deleted corrupted database at %s", DB_DIR)
+
             # Retry initialization
             os.makedirs(os.path.dirname(DB_DIR), exist_ok=True)
             _chroma_client = chromadb.PersistentClient(path=DB_DIR, settings=_chroma_settings)
@@ -125,22 +128,22 @@ def _init_rag_impl():
                 embedding_function=ef
             )
             _rag_available = True
-            print("[RAG] Database reset successfully")
+            logger.info("Database reset successfully")
         except Exception as retry_err:
-            print(f"[RAG] Failed to reset database: {str(retry_err)}")
-            print("[RAG] Continuing without RAG support...")
+            logger.error("Failed to reset database: %s", retry_err)
+            logger.warning("Continuing without RAG support...")
             _rag_available = False
             _chroma_client = None
             _collection = None
         return
-    
+
     # Load knowledge base only when it changed. Re-embedding on every restart is
     # the expensive path that made startup and first requests feel slow.
     if os.path.exists(KNOWLEDGE_FILE):
         try:
             knowledge_hash = _file_sha256(KNOWLEDGE_FILE)
             if _knowledge_is_current(knowledge_hash):
-                print("[RAG] Knowledge base unchanged. Using persisted ChromaDB collection.")
+                logger.info("Knowledge base unchanged. Using persisted ChromaDB collection.")
                 return
 
             with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
@@ -171,13 +174,13 @@ def _init_rag_impl():
                         ids=ids
                     )
                     _save_manifest(knowledge_hash, len(documents))
-                    print(f"[RAG] Indexed {len(documents)} chunks from knowledge base.")
+                    logger.info("Indexed %d chunks from knowledge base.", len(documents))
             else:
-                print("[RAG] Warning: knowledge.json must be a JSON array of objects.")
+                logger.warning("knowledge.json must be a JSON array of objects.")
         except Exception as e:
-            print(f"[RAG] Error loading knowledge base: {e}")
+            logger.error("Error loading knowledge base: %s", e)
     else:
-        print(f"[RAG] No knowledge.json found at {KNOWLEDGE_FILE}. Skipping RAG init.")
+        logger.info("No knowledge.json found at %s. Skipping RAG init.", KNOWLEDGE_FILE)
 
 def _tenancy_where(user_id: str = None) -> dict:
     """
@@ -219,7 +222,7 @@ def search_knowledge(query_text: str, n_results: int = 3, user_id: str = None) -
         context_chunks = results["documents"][0]
         return "\n\n".join([f"--- Context {i+1} ---\n{chunk}" for i, chunk in enumerate(context_chunks)])
     except Exception as e:
-        print(f"[RAG] Query error: {e}")
+        logger.error("Query error: %s", e)
         return ""
 
 
@@ -270,4 +273,4 @@ def ingest_document(text: str, filename: str, user_id: str):
         ids.append(str(uuid.uuid4()))
 
     _collection.upsert(documents=documents, metadatas=metadatas, ids=ids)
-    print(f"[RAG] Ingested {len(documents)} chunks from {filename}")
+    logger.info("Ingested %d chunks from %s", len(documents), filename)

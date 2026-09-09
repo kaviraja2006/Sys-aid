@@ -12,6 +12,7 @@ Key fixes vs previous version:
   5. Cache + max_tokens — carried over from previous optimisation pass
 """
 import asyncio
+import logging
 import os
 import subprocess
 
@@ -20,6 +21,8 @@ import litellm
 
 from app.core.cache import response_cache
 from app.core.history import build_message_list
+
+logger = logging.getLogger(__name__)
 
 # ── 1. Silence noisy litellm I/O before anything else ───────────────────────
 litellm.set_verbose = False
@@ -129,7 +132,7 @@ def _start_ollama_sync():
                 stderr=subprocess.DEVNULL,
             )
         except Exception as e:
-            print(f"Ollama start error: {e}")
+            logger.error("Ollama start error: %s", e)
 
 
 def _stop_ollama_sync():
@@ -331,7 +334,7 @@ async def call_llm(
             response_cache.set(prompt, provider, model_name, result)
         return result
     except Exception as e:
-        print(f"LLM Error [{provider}/{litellm_model}]: {e}")
+        logger.error("LLM Error [%s/%s]: %s", provider, litellm_model, e)
         raise
 
 

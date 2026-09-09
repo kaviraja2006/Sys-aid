@@ -1,55 +1,14 @@
-import { useState, useEffect, useRef, memo, useMemo } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { Send, Bot, User, Sparkles, RefreshCcw, ChevronLeft, ChevronRight, History, X, PenTool, Settings, Trash2, Search, CheckCircle, AlertTriangle, Mic, MicOff } from 'lucide-react';
 import { api, API_URL } from './config/api';
 import { secureGet, secureSet } from './utils/secureStorage';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
-// Memoized message bubble — only re-renders when the message text changes
-// This prevents all previous messages from re-rendering during streaming
-const ChatMessage = memo(({ msg, isStreaming }) => {
-  const mdComponents = useMemo(() => ({
-    code({ node, inline, className, children, ...props }) {
-      const match = /language-(\w+)/.exec(className || '');
-      return !inline && match ? (
-        <SyntaxHighlighter style={vscDarkPlus} language={match[1]} PreTag="div" {...props}>
-          {String(children).replace(/\n$/, '')}
-        </SyntaxHighlighter>
-      ) : (
-        <code className="bg-[#2c2d31] px-1 py-0.5 rounded text-blue-300" {...props}>{children}</code>
-      );
-    }
-  }), []);
-
-  return (
-    <div className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center border shadow-sm ${msg.role === 'user' ? 'bg-blue-600/20 border-blue-500/30 text-blue-400' : 'bg-[#1a1b1e] border-[#2c2d31] text-gray-300'}`}>
-        {msg.role === 'user' ? <User size={14} /> : <Bot size={14} />}
-      </div>
-      <div className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} max-w-[85%]`}>
-        <div className={`px-4 py-3 rounded-2xl text-[13px] xl:text-[14px] leading-relaxed shadow-sm w-full markdown-body ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-tr-[4px]' : 'bg-[#151618] border border-[#232427] text-gray-200 rounded-tl-[4px]'}`}>
-          {msg.text ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-              {msg.text}
-            </ReactMarkdown>
-          ) : (
-            isStreaming && msg.role === 'ai' && (
-              <span className="flex gap-1 items-center text-gray-500">
-                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay:'0ms'}}/>
-                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay:'150ms'}}/>
-                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay:'300ms'}}/>
-              </span>
-            )
-          )}
-        </div>
-      </div>
-    </div>
-  );
-});
-ChatMessage.displayName = 'ChatMessage';
+// react-markdown + remark-gfm + react-syntax-highlighter (ChatMessage.jsx)
+// are by far the heaviest slice of this bundle — split into their own chunk,
+// fetched only once the first message actually needs rendering, instead of
+// blocking initial paint on a brand-new chat session.
+const ChatMessage = lazy(() => import('./ChatMessage'));
 
 const initialMessage = {
   id: 1,
@@ -709,9 +668,16 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 xl:p-5 space-y-6 custom-scrollbar bg-gradient-to-b from-[#050505] to-[#0A0B0E] select-text">
-        {messages.map((msg) => (
-          <ChatMessage key={msg.id} msg={msg} isStreaming={loading} />
-        ))}
+        <Suspense fallback={messages.map((msg) => (
+          <div key={msg.id} className="flex gap-3 animate-pulse">
+            <div className="flex-shrink-0 w-8 h-8 rounded-full bg-[#1a1b1e] border border-[#2c2d31]" />
+            <div className="h-10 flex-1 max-w-[85%] rounded-2xl bg-[#151618] border border-[#232427]" />
+          </div>
+        ))}>
+          {messages.map((msg) => (
+            <ChatMessage key={msg.id} msg={msg} isStreaming={loading} />
+          ))}
+        </Suspense>
 
         {messages.length === 1 && (
           <div className="mt-8 flex flex-col gap-2 px-2">
