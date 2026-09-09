@@ -321,6 +321,11 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
             if (!data || data === '[DONE]') continue;
             let textChunk = '';
             try { textChunk = JSON.parse(data); } catch (e) { textChunk = data; }
+            if (textChunk && typeof textChunk === 'object' && textChunk.error) {
+              aiText += `\n\n_Error: ${textChunk.error}_`;
+              setMessages((prev) => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
+              continue;
+            }
             if (textChunk) {
               aiText += textChunk;
               setMessages((prev) => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));

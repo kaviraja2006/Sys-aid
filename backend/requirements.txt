@@ -12,4 +12,3 @@ sqlalchemy[asyncio]==2.0.51
 asyncpg==0.31.0
 redis==8.1.0
 google-auth==2.56.2
-itsdangerous==2.2.0

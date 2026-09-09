@@ -615,8 +615,13 @@ async def generate_design_stream(
     cache_payload = prompt_text + str(hashlib.md5(json.dumps(summarised or {}).encode()).hexdigest())
     cached = response_cache.get(cache_payload, provider, model_name)
     if cached:
-        # If cached, yield it immediately as a single large chunk
-        yield f"data: {cached}\n\n"
+        # Wrap in the same {"final": ...} envelope the live-generation path
+        # uses below. Sending the bare cached JSON object here used to make
+        # the frontend's `.final` check fail, fall into its string-append
+        # branch, and coerce the whole graph object to the literal text
+        # "[object Object]" (see ChatPanel.jsx's SSE handler) — i.e. every
+        # cache hit silently produced a broken draw.
+        yield f"data: {json.dumps({'final': cached})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
@@ -651,6 +656,7 @@ async def generate_design_stream(
         # If repair succeeds, send the canonical JSON as a distinct "final" event —
         # NOT a plain chunk — so the client replaces its accumulated buffer instead
         # of appending, which would concatenate raw+canonical into invalid JSON.
+        parse_succeeded = False
         try:
             parsed = _safe_parse(full_response)
             parsed = _merge_preserve_existing(current_design, parsed)
@@ -671,6 +677,7 @@ async def generate_design_stream(
             canonical = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
             yield f"data: {json.dumps({'final': canonical})}\n\n"
             full_response = canonical
+            parse_succeeded = True
         except Exception as e:
             # If repair fails, fall back to raw output; client may still recover.
             print(f"[design_service] _safe_parse failed: {e}\nRaw response (first 500 chars): {full_response[:500]!r}")
@@ -678,9 +685,11 @@ async def generate_design_stream(
         # End of stream marker
         yield "data: [DONE]\n\n"
 
-        # Save to cache after streaming is complete
-        # Only cache if it looks like valid JSON
-        if "{" in full_response and "}" in full_response:
+        # Only cache a successfully parsed/repaired graph. Caching raw,
+        # unparseable model output here used to replay the same broken
+        # response for every identical prompt+design until the TTL expired,
+        # since a cache hit skips _safe_parse entirely on the next request.
+        if parse_succeeded:
             response_cache.set(cache_payload, provider, model_name, full_response)
             
     except Exception as e:

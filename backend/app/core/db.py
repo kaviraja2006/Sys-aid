@@ -11,7 +11,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 if not DATABASE_URL:
     raise RuntimeError(
         "DATABASE_URL is not set. Add it to backend/.env, "
-        "e.g. postgresql+psycopg://user:pass@host:5432/dbname"
+        "e.g. postgresql+asyncpg://user:pass@host:5432/dbname "
+        "(asyncpg is the driver installed in requirements.txt; +psycopg will "
+        "not work here)"
     )
 
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)

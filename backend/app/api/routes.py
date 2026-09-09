@@ -44,7 +44,8 @@ async def generate_board_endpoint(request: Request, req: GenerateRequest):
 
 
 @router.post("/simulate")
-async def simulate(req: SimulationInput):
+@limiter.limit("10/minute")
+async def simulate(request: Request, req: SimulationInput):
     return simulate_system(req)
 
 
@@ -72,16 +73,11 @@ async def review(request: Request, req: GenerateRequest):
     return result
 
 
-@router.get("/health")
-async def health_check():
-    """Check if backend is running and RAG is available."""
-    from app.core.rag import _rag_available
-    
-    return {
-        "status": "ok",
-        "rag_available": _rag_available
-    }
-
+# NOTE: no /health here — main.py already registers a public, no-auth
+# /health at the same path with identical output. A second one on this
+# API-key-gated router used to shadow it (FastAPI matches routes in
+# registration order, and this router's routes are added first), which broke
+# Docker's/the platform's health check the moment BACKEND_API_KEY was set.
 
 # ── Cache management endpoints ────────────────────────────────────────────────
 

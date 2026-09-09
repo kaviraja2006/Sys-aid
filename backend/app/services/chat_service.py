@@ -42,6 +42,10 @@ async def handle_chat_stream(
             # Format as Server-Sent Event with JSON escaping to preserve newlines
             yield f"data: {json.dumps(chunk)}\n\n"
     except Exception as e:
-        yield f"data: {json.dumps(str(e))}\n\n"
+        # Wrap as {"error": ...} — a bare string chunk is indistinguishable
+        # from real assistant text on the client, so a raised exception (bad
+        # key, timeout, provider outage) used to render as if the model had
+        # said it.
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
     finally:
         yield "data: [DONE]\n\n"
