@@ -13,11 +13,30 @@ from app.api import routes, chats, auth_routes
 from app.core.llm import stop_ollama as _stop_ollama, close_http_client, _warmup
 from app.core.rag import RAG_ENABLED
 from app.core.db import init_models
+from app.core.auth import cleanup_expired_sessions
 from contextlib import asynccontextmanager
 import os
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.core.limiter import limiter
+
+SESSION_CLEANUP_INTERVAL_SECONDS = float(os.getenv("SESSION_CLEANUP_INTERVAL_SECONDS", str(6 * 60 * 60)))
+
+
+async def _session_cleanup_loop():
+    """Periodically delete expired session rows so the table doesn't grow
+    without bound. Runs for the life of the process; one failed sweep (e.g. a
+    transient DB blip) is logged and doesn't kill the loop or the server."""
+    while True:
+        try:
+            await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
+            deleted = await cleanup_expired_sessions()
+            if deleted:
+                print(f"[session cleanup] Deleted {deleted} expired session(s).")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[session cleanup] Sweep failed (will retry next interval): {e}")
 
 
 @asynccontextmanager
@@ -46,13 +65,20 @@ async def lifespan(app: FastAPI):
 
     # Initialize Postgres tables (users, sessions, chat_sessions)
     await init_models()
-    
+
+    session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
+
     print("SysAid AI: server ready. LLM pre-warm running in background...")
 
     yield  # ← app runs here
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
     print("Shutting down — closing HTTP pool and any local LLM processes...")
+    session_cleanup_task.cancel()
+    try:
+        await session_cleanup_task
+    except asyncio.CancelledError:
+        pass
     await close_http_client()
     _stop_ollama()
 

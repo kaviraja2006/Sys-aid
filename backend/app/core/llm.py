@@ -12,10 +12,11 @@ Key fixes vs previous version:
   5. Cache + max_tokens — carried over from previous optimisation pass
 """
 import asyncio
-import subprocess
-import litellm
-import httpx
 import os
+import subprocess
+
+import httpx
+import litellm
 
 from app.core.cache import response_cache
 from app.core.history import build_message_list
@@ -29,20 +30,26 @@ FAST_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "gemini": "gemini-1.5-flash",
     "anthropic": "claude-3-haiku-20240307",
-    "nvidia": "meta/llama-3.1-8b-instruct",
+    "nvidia": "mistralai/mistral-7b-instruct-v0.3",
     "ollama": "llama3.2:1b",
 }
 
 SLOW_MODEL_ALIASES = {
     "openai": {"gpt-4o": "gpt-4o-mini", "gpt-4": "gpt-4o-mini"},
-    "gemini": {"gemini-1.5-pro": "gemini-1.5-flash", "gemini-pro": "gemini-1.5-flash"},
+    "gemini": {
+        "gemini-1.5-pro": "gemini-1.5-flash",
+        "gemini-pro": "gemini-1.5-flash",
+    },
     "anthropic": {
         "claude-3-5-sonnet-20240620": "claude-3-haiku-20240307",
         "claude-3-opus-20240229": "claude-3-haiku-20240307",
     },
     "nvidia": {
-        "meta/llama-3.1-405b-instruct": "meta/llama-3.1-8b-instruct",
-        "meta/llama-3.1-70b-instruct": "meta/llama-3.1-8b-instruct",
+        "meta/llama-3.1-405b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
+        "meta/llama-3.1-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
+        "meta/llama-3.1-8b-instruct": "mistralai/mistral-7b-instruct-v0.3",
+        "meta/llama3-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
+        "meta/llama3-8b-instruct": "mistralai/mistral-7b-instruct-v0.3",
     },
     "ollama": {"llama3": "llama3.2:1b"},
 }
@@ -181,7 +188,7 @@ def _resolve_api_key(provider: str, api_key: str) -> str:
     env_map = {
         "nvidia": "NVIDIA_API_KEY",
         "openai": "OPENAI_API_KEY",
-        "gemini": "GOOGLE_API_KEY",
+        "gemini": "GEMINI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
     }
     
@@ -199,7 +206,7 @@ def _has_env_key(provider: str) -> bool:
     env_map = {
         "nvidia": "NVIDIA_API_KEY",
         "openai": "OPENAI_API_KEY",
-        "gemini": "GOOGLE_API_KEY",
+        "gemini": "GEMINI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
     }
     env_var = env_map.get(provider)
@@ -367,14 +374,11 @@ async def call_llm_stream(
     if api_base:
         kwargs["api_base"] = api_base
 
-    try:
-        response = await litellm.acompletion(**kwargs)
-        async for chunk in response:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
-    except Exception as e:
-        raise
+    response = await litellm.acompletion(**kwargs)
+    async for chunk in response:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
 
 
 def stop_ollama():
