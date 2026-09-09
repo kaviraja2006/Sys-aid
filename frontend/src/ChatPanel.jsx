@@ -294,6 +294,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
           'Content-Type': 'application/json',
           'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
         },
+        // Backend routes now identify the calling user (see get_current_user),
+        // which reads the session cookie set by /auth/google. A cross-origin
+        // fetch() doesn't send cookies unless told to.
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
@@ -360,6 +364,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
           'Content-Type': 'application/json',
           'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
         },
+        // Backend routes now identify the calling user (see get_current_user),
+        // which reads the session cookie set by /auth/google. A cross-origin
+        // fetch() doesn't send cookies unless told to.
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 

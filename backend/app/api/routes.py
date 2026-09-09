@@ -6,10 +6,12 @@ from app.services.improve_service import improve_design
 from app.services.chat_service import handle_chat_stream
 from app.services.review_service import review_architecture
 from app.models.schema import GenerateRequest, SimulationInput, ImproveRequest
+from app.models.db_models import User
 from app.core.cache import response_cache
 from app.core.rag import ingest_document
 from app.core.llm import call_llm, HEALTH_TIMEOUT_SECONDS
 from app.core.security import get_api_key
+from app.core.auth import get_current_user, get_current_user_optional
 from app.core.limiter import limiter
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
@@ -24,9 +26,9 @@ _SSE_HEADERS = {
 
 @router.post("/chat")
 @limiter.limit("10/minute")
-async def chat_endpoint(request: Request, req: GenerateRequest):
+async def chat_endpoint(request: Request, req: GenerateRequest, user: User | None = Depends(get_current_user_optional)):
     return StreamingResponse(
-        handle_chat_stream(req.prompt, req.chat_history, req),
+        handle_chat_stream(req.prompt, req.chat_history, req, user_id=user.id if user else None),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
@@ -34,10 +36,13 @@ async def chat_endpoint(request: Request, req: GenerateRequest):
 
 @router.post("/generate-board")
 @limiter.limit("10/minute")
-async def generate_board_endpoint(request: Request, req: GenerateRequest):
+async def generate_board_endpoint(request: Request, req: GenerateRequest, user: User | None = Depends(get_current_user_optional)):
     from app.services.design_service import generate_design_stream
     return StreamingResponse(
-        generate_design_stream(req.prompt, req.current_design, req.chat_history, req, req.documentation),
+        generate_design_stream(
+            req.prompt, req.current_design, req.chat_history, req, req.documentation,
+            user_id=user.id if user else None,
+        ),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
@@ -119,10 +124,10 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
 @router.post("/upload-knowledge")
 @limiter.limit("10/minute")
-async def upload_knowledge(request: Request, file: UploadFile = File(...)):
+async def upload_knowledge(request: Request, file: UploadFile = File(...), user: User = Depends(get_current_user)):
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 5 MB)")
     text = content.decode('utf-8', errors='ignore')
-    ingest_document(text, file.filename)
+    ingest_document(text, file.filename, user_id=user.id)
     return {"status": "success", "filename": file.filename}

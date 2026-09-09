@@ -38,6 +38,7 @@ export default function NodeDetailSidebar({ node, isOpen, onClose, llmConfig }) 
           'Content-Type': 'application/json',
           'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
         },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 

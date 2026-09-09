@@ -559,6 +559,7 @@ async def generate_design_stream(
     chat_history: Optional[List[Dict[str, str]]] = None,
     req_config: Any = None,
     documentation: Optional[str] = None,
+    user_id: Optional[str] = None,
 ):
     from app.core.llm import call_llm_stream
     from app.core.cache import response_cache
@@ -569,7 +570,9 @@ async def generate_design_stream(
     # Fetch context from knowledge base, but do not let vector search dominate
     # graph generation latency.
     try:
-        context = await asyncio.wait_for(search_knowledge_async(user_prompt, n_results=2), timeout=1.2)
+        context = await asyncio.wait_for(
+            search_knowledge_async(user_prompt, n_results=2, user_id=user_id), timeout=1.2
+        )
     except asyncio.TimeoutError:
         context = ""
     if context:

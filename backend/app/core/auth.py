@@ -124,6 +124,24 @@ async def get_current_user(request: Request) -> User:
         return user
 
 
+async def get_current_user_optional(request: Request) -> User | None:
+    """Same lookup as get_current_user, but returns None instead of raising
+    when there's no valid session — for routes that behave correctly either
+    way (e.g. RAG context scoping falls back to the shared base corpus) and
+    shouldn't start hard-rejecting callers that don't log in."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+
+    async with async_session_maker() as db:
+        db_session = await _lookup_session(db, token)
+        if not db_session or db_session.expires_at < datetime.now(timezone.utc):
+            return None
+
+        result = await db.execute(select(User).where(User.id == db_session.user_id))
+        return result.scalar_one_or_none()
+
+
 async def delete_session(request: Request, response: Response) -> None:
     token = request.cookies.get(SESSION_COOKIE)
     if token:

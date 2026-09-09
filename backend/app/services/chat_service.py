@@ -20,10 +20,13 @@ async def handle_chat_stream(
     user_prompt: str,
     chat_history: Optional[List[Dict[str, Any]]] = None,
     req_config: Optional[Any] = None,
+    user_id: Optional[str] = None,
 ):
     # Keep chat snappy: use RAG only if it is ready almost immediately.
     try:
-        context = await asyncio.wait_for(search_knowledge_async(user_prompt, n_results=1), timeout=0.6)
+        context = await asyncio.wait_for(
+            search_knowledge_async(user_prompt, n_results=1, user_id=user_id), timeout=0.6
+        )
     except asyncio.TimeoutError:
         context = ""
     prompt_to_use = f"{user_prompt}\n\n[Context]:\n{context}" if context else user_prompt
