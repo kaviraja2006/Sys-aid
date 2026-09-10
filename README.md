@@ -32,6 +32,14 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
+Schema is managed by [Alembic](https://alembic.sqlalchemy.org/) (`backend/alembic/`), not `create_all` — the app runs `alembic upgrade head` automatically on startup (see `app/core/db.py`), so a fresh `DATABASE_URL` is brought up to date with no manual step. Changed a model in `app/models/db_models.py`? Generate a migration for it:
+
+```bash
+cd backend
+alembic revision --autogenerate -m "describe the change"
+# review the generated file in alembic/versions/, then commit it
+```
+
 ### 2. Frontend
 
 ```bash

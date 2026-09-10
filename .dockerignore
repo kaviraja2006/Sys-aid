@@ -2,6 +2,14 @@ frontend/
 node_modules/
 .git/
 .gitignore
+.env
+.env.*
+!.env.example
+backend/venv/
+backend/.venv/
+backend/.pytest_cache/
+backend/.ruff_cache/
+**/__pycache__/
 README.md
 DEPLOYMENT.md
 QUICK_DEPLOY.md

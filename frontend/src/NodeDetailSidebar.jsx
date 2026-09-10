@@ -38,6 +38,7 @@ export default function NodeDetailSidebar({ node, isOpen, onClose, llmConfig }) 
           'Content-Type': 'application/json',
           'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
         },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
@@ -61,12 +62,17 @@ export default function NodeDetailSidebar({ node, isOpen, onClose, llmConfig }) 
           const data = line.slice(6).trim();
           if (!data || data === '[DONE]') continue;
           
+          let chunk;
           try {
-            const chunk = JSON.parse(data);
-            fullText += chunk;
+            chunk = JSON.parse(data);
           } catch (e) {
             fullText += data;
+            continue;
           }
+          if (chunk && typeof chunk === 'object' && chunk.error) {
+            throw new Error(chunk.error);
+          }
+          fullText += chunk;
         }
       }
 

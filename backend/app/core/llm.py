@@ -12,13 +12,17 @@ Key fixes vs previous version:
   5. Cache + max_tokens — carried over from previous optimisation pass
 """
 import asyncio
-import subprocess
-import litellm
-import httpx
+import logging
 import os
+import subprocess
+
+import httpx
+import litellm
 
 from app.core.cache import response_cache
 from app.core.history import build_message_list
+
+logger = logging.getLogger(__name__)
 
 # ── 1. Silence noisy litellm I/O before anything else ───────────────────────
 litellm.set_verbose = False
@@ -29,27 +33,58 @@ FAST_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "gemini": "gemini-1.5-flash",
     "anthropic": "claude-3-haiku-20240307",
-    "nvidia": "meta/llama-3.1-8b-instruct",
+    # NVIDIA (build.nvidia.com / integrate.api.nvidia.com) retires catalog
+    # ids with no warning — a bulk EOL on 2026-08-26 took out most of the
+    # "obvious" small model ids (meta/llama-3.1-8b-instruct and nearly every
+    # other meta/*, microsoft/*, and nvidia/nemotron-super/nano id included).
+    # This value was confirmed live by hitting integrate.api.nvidia.com
+    # directly (403 Forbidden-with-bad-key = model exists; 410/404 = it
+    # doesn't) — don't swap it back to a "looks right" id without doing the
+    # same check, since NVIDIA's own model pages can lag the API's real state.
+    "nvidia": "mistralai/mistral-nemotron",
     "ollama": "llama3.2:1b",
 }
 
+# Only for genuinely slow/heavy models or ids NVIDIA has retired — never for
+# a model id that is itself valid and reasonably fast, since silently serving
+# a different model than the one the user picked is confusing on its own,
+# and doubly so if the substitute is later retired too (see history above).
 SLOW_MODEL_ALIASES = {
     "openai": {"gpt-4o": "gpt-4o-mini", "gpt-4": "gpt-4o-mini"},
-    "gemini": {"gemini-1.5-pro": "gemini-1.5-flash", "gemini-pro": "gemini-1.5-flash"},
+    "gemini": {
+        "gemini-1.5-pro": "gemini-1.5-flash",
+        "gemini-pro": "gemini-1.5-flash",
+    },
     "anthropic": {
         "claude-3-5-sonnet-20240620": "claude-3-haiku-20240307",
         "claude-3-opus-20240229": "claude-3-haiku-20240307",
     },
+    # All three targets below were live-confirmed the same way as the
+    # FAST_DEFAULT_MODELS entry above, on the same date.
     "nvidia": {
-        "meta/llama-3.1-405b-instruct": "meta/llama-3.1-8b-instruct",
-        "meta/llama-3.1-70b-instruct": "meta/llama-3.1-8b-instruct",
+        # extreme/slow tier -> fast default
+        "nvidia/nemotron-4-340b-instruct": "mistralai/mistral-nemotron",
+        "mistralai/mistral-large-2-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
+        # ids this app itself used to hand out (now-EOL'd) -> nearest live equivalent
+        "meta/llama-3.1-405b-instruct": "mistralai/mistral-nemotron",
+        "meta/llama-3.1-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
+        "meta/llama-3.1-8b-instruct": "mistralai/mistral-nemotron",
+        "meta/llama3-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
+        "meta/llama3-8b-instruct": "mistralai/mistral-nemotron",
+        "mistralai/mistral-7b-instruct-v0.3": "mistralai/mistral-nemotron",
     },
     "ollama": {"llama3": "llama3.2:1b"},
 }
 
 CHAT_TIMEOUT_SECONDS = float(os.getenv("LLM_CHAT_TIMEOUT_SECONDS", "30"))
 GENERATE_TIMEOUT_SECONDS = float(os.getenv("LLM_GENERATE_TIMEOUT_SECONDS", "60"))
-HEALTH_TIMEOUT_SECONDS = float(os.getenv("LLM_HEALTH_TIMEOUT_SECONDS", "25"))
+# NVIDIA's free-tier hosted NIM endpoints (build.nvidia.com) spin their
+# container down after inactivity — the first call after a cold container
+# can take 45-60s+ to respond even though the key/model are both fine. 25s
+# was cutting that off mid-cold-start and reporting a false "connection
+# failed". 60s covers a cold start; a genuinely dead key/model still fails
+# fast (401/404) long before this ever kicks in.
+HEALTH_TIMEOUT_SECONDS = float(os.getenv("LLM_HEALTH_TIMEOUT_SECONDS", "60"))
 # Below this, a slow-but-alive connection is treated as normal; past it we
 # start warning the caller the model just needs more time (see routes.py).
 HEALTH_WARN_AFTER_SECONDS = float(os.getenv("LLM_HEALTH_WARN_AFTER_SECONDS", "8"))
@@ -122,7 +157,7 @@ def _start_ollama_sync():
                 stderr=subprocess.DEVNULL,
             )
         except Exception as e:
-            print(f"Ollama start error: {e}")
+            logger.error("Ollama start error: %s", e)
 
 
 def _stop_ollama_sync():
@@ -181,7 +216,7 @@ def _resolve_api_key(provider: str, api_key: str) -> str:
     env_map = {
         "nvidia": "NVIDIA_API_KEY",
         "openai": "OPENAI_API_KEY",
-        "gemini": "GOOGLE_API_KEY",
+        "gemini": "GEMINI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
     }
     
@@ -199,7 +234,7 @@ def _has_env_key(provider: str) -> bool:
     env_map = {
         "nvidia": "NVIDIA_API_KEY",
         "openai": "OPENAI_API_KEY",
-        "gemini": "GOOGLE_API_KEY",
+        "gemini": "GEMINI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
     }
     env_var = env_map.get(provider)
@@ -246,6 +281,78 @@ def _normalize_api_base(provider: str, api_url: str) -> str:
         if api_url.endswith(suffix):
             return api_url[: -len(suffix)]
     return api_url
+
+
+def _friendlier_error(e: Exception, provider: str, litellm_model: str) -> Exception:
+    """
+    Rewrap a litellm exception with an actionable message for the two failure
+    modes users actually hit when self-configuring a provider: a bad/expired
+    API key, and a model id that isn't valid for that provider (typo, or —
+    for NVIDIA in particular — a catalog id that's since been retired). The
+    original exception is chained (`raise ... from e`) so the full litellm
+    detail is still in the traceback/logs; this is only the user-facing text.
+    """
+    text = str(e)
+    text_lower = text.lower()
+    # NVIDIA responds 410 Gone (not 404) for a retired-but-once-valid id, with
+    # its own "end of life" wording — litellm surfaces this as a generic
+    # APIError rather than NotFoundError, so it needs its own text match.
+    if "end of life" in text_lower or "no longer available" in text_lower:
+        return RuntimeError(
+            f"Model '{litellm_model}' has been retired by {provider} (it "
+            "used to work but the provider pulled it from their catalog). "
+            "Pick a different one from the dropdown in Settings, or check "
+            "the provider's current model catalog for a replacement."
+        )
+    if isinstance(e, litellm.exceptions.NotFoundError) or "404" in text or "not found" in text_lower:
+        return RuntimeError(
+            f"Model '{litellm_model}' was not found by {provider}. Pick one "
+            "from the dropdown in Settings (kept in sync with what's "
+            "currently live), or double-check a custom id against the "
+            "provider's own model catalog — ids get retired without notice."
+        )
+    if isinstance(e, litellm.exceptions.AuthenticationError) or "401" in text or "403" in text:
+        return RuntimeError(
+            f"{provider} rejected the API key (authentication/authorization "
+            "error). Check that the key is correct, active, and has access "
+            "to this model."
+        )
+    return e
+
+
+def _disable_reasoning_if_needed(provider: str, model_name: str, system_prompt: str) -> str:
+    """
+    NVIDIA's Nemotron family (mistralai/mistral-nemotron included — our own
+    FAST_DEFAULT_MODELS entry for "nvidia") defaults to an extended "detailed
+    thinking" chain-of-thought mode: before ever emitting the requested JSON,
+    it can spend most of its token/time budget on invisible reasoning. For a
+    single non-streamed structured-output call (board generation) that's the
+    direct cause of the "Generation timed out after Ns" error — the model is
+    still "working", it's just thinking instead of answering, and DRAW_TIMEOUT
+    _SECONDS runs out first. NVIDIA's Nemotron models honor a literal
+    "detailed thinking off" directive prepended to the system prompt to skip
+    straight to the answer — documented provider behavior, not a generic
+    prompt trick — so only apply it to nemotron-family model ids.
+    """
+    if provider == "nvidia" and "nemotron" in model_name.lower():
+        return "detailed thinking off\n" + system_prompt
+    return system_prompt
+
+
+def resolve_effective_model(provider: str, api_key: str, model_name: str, api_url: str = ""):
+    """
+    Public helper so callers (design_service's timeout/error messages, logs)
+    can report the model that ACTUALLY ran, not the caller's raw input.
+    call_llm applies its own normalization/aliasing internally (empty
+    provider -> whatever's configured via env, an EOL'd model id -> its
+    replacement, etc.), so `req_config.provider`/`model_name` as received
+    from the frontend can silently differ from what was really sent to the
+    upstream API — without this, a timeout/error message naming the wrong
+    model sends whoever's debugging it chasing the wrong fix.
+    """
+    provider = _normalize_provider(provider, api_key, api_url)
+    model_name = _normalize_model(provider, model_name)
+    return provider, model_name
 
 
 def _resolve_litellm_args(provider: str, api_key: str, model_name: str, api_url: str):
@@ -297,6 +404,7 @@ async def call_llm(
     resolved_api_key = _resolve_api_key(provider, api_key)
     
     litellm_model, api_base = _resolve_litellm_args(provider, api_key, model_name, api_url)
+    system_prompt = _disable_reasoning_if_needed(provider, model_name, system_prompt)
 
     messages = []
     if system_prompt:
@@ -324,8 +432,8 @@ async def call_llm(
             response_cache.set(prompt, provider, model_name, result)
         return result
     except Exception as e:
-        print(f"LLM Error [{provider}/{litellm_model}]: {e}")
-        raise
+        logger.error("LLM Error [%s/%s]: %s", provider, litellm_model, e)
+        raise _friendlier_error(e, provider, litellm_model) from e
 
 
 async def call_llm_stream(
@@ -346,6 +454,7 @@ async def call_llm_stream(
     await _check_managed_process(provider, api_url)
 
     # Build compact, windowed message list (no fat history blobs)
+    system_prompt = _disable_reasoning_if_needed(provider, model_name, system_prompt)
     messages = build_message_list(system_prompt, chat_history, prompt)
 
     # ✅ Resolve API key: use frontend's key or fall back to .env
@@ -374,7 +483,8 @@ async def call_llm_stream(
             if delta:
                 yield delta
     except Exception as e:
-        raise
+        logger.error("LLM Stream Error [%s/%s]: %s", provider, litellm_model, e)
+        raise _friendlier_error(e, provider, litellm_model) from e
 
 
 def stop_ollama():

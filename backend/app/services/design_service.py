@@ -3,11 +3,14 @@ Generate-board service.
 Produces a valid React Flow JSON graph from a user description.
 """
 import json
+import logging
 import re
 import asyncio
-from app.core.llm import call_llm
+from app.core.llm import call_llm, resolve_effective_model
 from app.core.rag import search_knowledge_async
 from typing import Optional, Dict, Any, List
+
+logger = logging.getLogger(__name__)
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 # Rules:
@@ -17,7 +20,7 @@ from typing import Optional, Dict, Any, List
 _SYSTEM = (
     'You are a system architecture expert designing production-grade architecture diagrams. '
     'Respond with ONLY a single valid JSON object — no markdown, no explanation, no code fences. '
-    'The JSON must have exactly two keys: "nodes" and "edges". '
+    'The JSON must have keys "nodes" and "edges" (plus "removed_node_ids", see rule 8, only when it applies). '
     'Each node: {"id":"string","type":"archNode","data":{"label":"string","description":"string","systemType":"string"}} '
     'systemType must be one of: database, server, client, cloud, cache, default. '
     'Each edge: {"id":"string","source":"nodeId","target":"nodeId","label":"string","type":"smoothstep","animated":true} '
@@ -51,6 +54,12 @@ _SYSTEM = (
     'the user\'s request explicitly asks to change that specific node or edge. Add only the new nodes '
     'and edges needed for the request — never omit, rename, merge, or re-route a part of the diagram '
     'the request did not ask you to touch. '
+    '(8) If the request explicitly asks to remove, delete, or drop a component that exists in '
+    'existing_design, omit that node (and any edge touching it) from "nodes"/"edges" AND list its exact '
+    'existing_design id in a third top-level key, "removed_node_ids" (an array of strings) — this is the '
+    'ONLY way a removal is honored, since an id simply missing from your output is otherwise treated as '
+    'an accidental drop and restored. Never put an id in removed_node_ids unless the request explicitly '
+    'asked to remove that component; omit this key entirely (or leave it empty) when nothing was removed. '
     'The chat history is a running discussion where the user may add, remove, or revise '
     'components over several turns — always resolve to the LATEST decision on each point, '
     'not earlier ones that were later changed or rejected. '
@@ -62,6 +71,11 @@ _SYSTEM = (
     'or communication path described in architecture_documentation must be represented by an edge, '
     'and every edge you draw must correspond to something described there — do not add relationships '
     'the documentation does not mention. Use the same names for components as the documentation uses. '
+    'The user message you receive is itself a JSON object — it is INPUT DATA describing the request, '
+    'not a template to imitate. It uses keys like "request", "history", "instruction", "existing_design" '
+    'and "architecture_documentation". NEVER reuse those key names, and never copy or restate any part '
+    'of that input JSON, in your output — your output has ONLY "nodes" and "edges", plus "removed_node_ids" '
+    'when rule (8) applies, nothing else. '
     'Output raw JSON only. First character must be "{".'
 )
 
@@ -407,7 +421,9 @@ def _ensure_connected(parsed: dict) -> dict:
         return parsed
 
 
-def _merge_preserve_existing(original: Optional[Dict[str, Any]], parsed: dict) -> dict:
+def _merge_preserve_existing(
+    original: Optional[Dict[str, Any]], parsed: dict, removed_ids: Optional[set] = None
+) -> dict:
     """
     Safety net for incremental updates (a request against an existing
     design). The system prompt already instructs the model to reproduce
@@ -421,10 +437,19 @@ def _merge_preserve_existing(original: Optional[Dict[str, Any]], parsed: dict) -
     re-appended unchanged. Anything the model kept, changed, or added is
     left exactly as the model produced it — this only ever ADDS back
     accidentally-dropped nodes/edges, it never overrides an intentional edit.
+
+    `removed_ids` (the model's own "removed_node_ids", see rule 8 in
+    _SYSTEM) is the one exception: without it, this safety net was
+    indistinguishable from an actual bug — asking to delete a component made
+    the model correctly omit it, and this function then silently resurrected
+    it because "missing from the new output" was its only signal. An id in
+    removed_ids is trusted as an intentional deletion and is never restored,
+    nor is any edge touching it.
     """
     if not original or not isinstance(original.get("nodes"), list):
         return parsed
     try:
+        removed_ids = removed_ids or set()
         new_nodes = parsed.get("nodes")
         new_edges = parsed.get("edges")
         if not isinstance(new_nodes, list):
@@ -434,7 +459,11 @@ def _merge_preserve_existing(original: Optional[Dict[str, Any]], parsed: dict) -
 
         new_node_ids = {n.get("id") for n in new_nodes if isinstance(n, dict)}
         for n in original["nodes"]:
-            if isinstance(n, dict) and n.get("id") and n["id"] not in new_node_ids:
+            if (
+                isinstance(n, dict) and n.get("id")
+                and n["id"] not in new_node_ids
+                and n["id"] not in removed_ids
+            ):
                 new_nodes.append(n)
                 new_node_ids.add(n["id"])
 
@@ -447,9 +476,14 @@ def _merge_preserve_existing(original: Optional[Dict[str, Any]], parsed: dict) -
                 continue
             pair = (e.get("source"), e.get("target"))
             # Only restore if both endpoints are still present in the merged
-            # graph — an endpoint the model deliberately removed shouldn't
-            # get a dangling edge resurrected for it.
-            if pair not in new_edge_pairs and pair[0] in new_node_ids and pair[1] in new_node_ids:
+            # graph and neither was explicitly removed this turn — an
+            # endpoint the model deliberately dropped (deletion or otherwise)
+            # shouldn't get a dangling edge resurrected for it.
+            if (
+                pair not in new_edge_pairs
+                and pair[0] in new_node_ids and pair[1] in new_node_ids
+                and pair[0] not in removed_ids and pair[1] not in removed_ids
+            ):
                 new_edges.append(e)
                 new_edge_pairs.add(pair)
 
@@ -553,14 +587,100 @@ async def _repair_missing_components(
     return parsed
 
 
+async def update_design_from_turn(
+    user_prompt: str,
+    ai_response: str,
+    current_design: Optional[Dict[str, Any]],
+    req_config: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Keep the design graph in sync with the conversation turn-by-turn instead
+    of only building it from scratch when the user clicks Draw. Sends just
+    this one exchange (not the full history) against the existing graph, so
+    it stays cheap and fast, and asks the model to layer in only what this
+    turn adds, changes, or replaces — everything else in the existing graph
+    is left untouched (enforced server-side by _merge_preserve_existing, same
+    as the full draw path).
+
+    Best-effort: returns None on any failure (bad JSON, timeout, nothing to
+    draw yet) rather than raising — a chat turn must never fail because the
+    background graph sync did.
+    """
+    summarised = _summarise_design(current_design)
+    payload: Dict[str, Any] = {"request": user_prompt, "assistant_response": ai_response}
+    if summarised:
+        payload["existing_design"] = summarised
+        payload["instruction"] = (
+            "Sync the design with this one new exchange only. Reproduce every "
+            "node and edge in existing_design exactly as given UNLESS "
+            "assistant_response explicitly replaces, removes, or changes it — "
+            "then apply that change. Add nodes/edges only for new components "
+            "this exchange introduces. Do not rebuild or reinterpret the rest. "
+            "If this exchange asks to remove/delete/drop an existing component, "
+            "you MUST list its existing_design id in removed_node_ids (rule 8) — "
+            "simply leaving it out of nodes/edges is not enough, it will be "
+            "restored automatically otherwise."
+        )
+    else:
+        payload["instruction"] = (
+            "If this exchange already describes concrete system components, "
+            "create a new design graph for them now. If it is only a "
+            "clarifying question with no concrete architecture decided yet, "
+            'return {"nodes":[],"edges":[]} — do not invent a design.'
+        )
+
+    provider = req_config.provider if req_config else "ollama"
+    model_name = req_config.model_name if req_config else ""
+    api_key = req_config.api_key if req_config else ""
+    api_url = req_config.api_url if req_config else ""
+
+    # A single turn's delta only ever needs a handful of nodes/edges — capped
+    # small on purpose so a slow/heavy model still has a realistic chance of
+    # finishing before the timeout below, instead of the same 4096-8192
+    # budget the full draw uses.
+    TIMEOUT_SECONDS = 30
+    try:
+        raw = await asyncio.wait_for(
+            call_llm(
+                json.dumps(payload, separators=(",", ":")),
+                system_prompt=_SYSTEM,
+                provider=provider,
+                api_key=api_key,
+                model_name=model_name,
+                api_url=api_url,
+                max_tokens=2048,
+                timeout_seconds=TIMEOUT_SECONDS,
+                use_cache=False,
+            ),
+            timeout=TIMEOUT_SECONDS + 5,
+        )
+        parsed = _safe_parse(raw)
+        if not isinstance(parsed.get("nodes"), list):
+            return None
+        if not parsed["nodes"] and not summarised:
+            return None  # explicit "nothing to draw yet" — don't blank the canvas
+        removed_ids = set(parsed.pop("removed_node_ids", None) or [])
+        parsed = _merge_preserve_existing(current_design, parsed, removed_ids)
+        parsed = _clean_graph(parsed)
+        parsed = _ensure_connected(parsed)
+        return parsed
+    except Exception as e:
+        eff_provider, eff_model = resolve_effective_model(provider, api_key, model_name, api_url)
+        logger.warning(
+            "Incremental design sync failed/timed out this turn [%s (%s)]: %s",
+            eff_model, eff_provider, e,
+        )
+        return None
+
+
 async def generate_design_stream(
     user_prompt: str,
     current_design: Optional[Dict[str, Any]] = None,
     chat_history: Optional[List[Dict[str, str]]] = None,
     req_config: Any = None,
     documentation: Optional[str] = None,
+    user_id: Optional[str] = None,
 ):
-    from app.core.llm import call_llm_stream
     from app.core.cache import response_cache
     import hashlib
 
@@ -569,7 +689,9 @@ async def generate_design_stream(
     # Fetch context from knowledge base, but do not let vector search dominate
     # graph generation latency.
     try:
-        context = await asyncio.wait_for(search_knowledge_async(user_prompt, n_results=2), timeout=1.2)
+        context = await asyncio.wait_for(
+            search_knowledge_async(user_prompt, n_results=2, user_id=user_id), timeout=1.2
+        )
     except asyncio.TimeoutError:
         context = ""
     if context:
@@ -615,74 +737,139 @@ async def generate_design_stream(
     cache_payload = prompt_text + str(hashlib.md5(json.dumps(summarised or {}).encode()).hexdigest())
     cached = response_cache.get(cache_payload, provider, model_name)
     if cached:
-        # If cached, yield it immediately as a single large chunk
-        yield f"data: {cached}\n\n"
+        # Wrap in the same {"final": ...} envelope the live-generation path
+        # uses below. Sending the bare cached JSON object here used to make
+        # the frontend's `.final` check fail, fall into its string-append
+        # branch, and coerce the whole graph object to the literal text
+        # "[object Object]" (see ChatPanel.jsx's SSE handler) — i.e. every
+        # cache hit silently produced a broken draw.
+        yield f"data: {json.dumps({'final': cached})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
-    full_response = ""
+    # ── Single request/response, not token-by-token streaming ───────────────
+    # A partial graph is unusable — there's nothing to show the user until
+    # the JSON is 100% complete anyway — so streaming it token-by-token only
+    # bought cost, not benefit: a reasoning model's long silent "thinking"
+    # phase (empty content deltas) read as a frozen UI with no real timeout
+    # catching it, and both ends needed their own JSON-repair engine just to
+    # cope with parsing a growing, incomplete blob live. This calls the model
+    # ONCE, validates the COMPLETE output before saying anything to the
+    # client, and only ever sends one of exactly two outcomes: a validated
+    # diagram, or a clear error. A lightweight heartbeat (elapsed seconds)
+    # keeps the "Drawing architecture..." UI visibly alive while waiting.
+    # 240s — a reasoning model (e.g. NVIDIA's mistral-nemotron) generating a
+    # large structured JSON graph genuinely needs more headroom than a plain
+    # chat model would; 150s was cutting off requests that were still making
+    # real progress, not stuck. The heartbeat below keeps the UI visibly
+    # alive the whole time so this doesn't read as frozen.
+    DRAW_TIMEOUT_SECONDS = 240
+    HEARTBEAT_INTERVAL_SECONDS = 2
+
+    llm_task = asyncio.ensure_future(call_llm(
+        prompt_text,
+        system_prompt=_SYSTEM,
+        provider=provider,
+        api_key=api_key,
+        model_name=model_name,
+        api_url=api_url,
+        # 8192 was sized for the model to have headroom, not because a real
+        # design needs that many output tokens — but output-token count is
+        # exactly what caps how long a slow model takes to finish (there's no
+        # way to make a model emit tokens faster from here). Halving this
+        # roughly halves the worst-case wall-clock time for a heavy/uncurated
+        # model without truncating any realistically-sized diagram.
+        max_tokens=4096,
+        timeout_seconds=DRAW_TIMEOUT_SECONDS,
+        use_cache=False,  # this function keeps its own richer, design-aware cache key below
+    ))
+
+    elapsed = 0
+    raw = None
     try:
-        # Use call_llm_stream with system_prompt
-        stream = call_llm_stream(
-            prompt=prompt_text,
-            chat_history=[], # We already put history in payload
-            system_prompt=_SYSTEM,
-            provider=provider,
-            api_key=api_key,
-            model_name=model_name,
-            api_url=api_url,
-            max_tokens=8192,
-            stop=[],
-            timeout_seconds=60,
-        )
-        
-        async for chunk in stream:
-            if isinstance(chunk, str) and chunk.strip().startswith('[Error:'):
-                error_text = chunk.strip()
-                yield f"data: {json.dumps({ 'error': error_text })}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
-            full_response += chunk
-            # Wrap as SSE
-            yield f"data: {json.dumps(chunk)}\n\n"
-
-        # Try to parse/repair into strict JSON for the client.
-        # If repair succeeds, send the canonical JSON as a distinct "final" event —
-        # NOT a plain chunk — so the client replaces its accumulated buffer instead
-        # of appending, which would concatenate raw+canonical into invalid JSON.
-        try:
-            parsed = _safe_parse(full_response)
-            parsed = _merge_preserve_existing(current_design, parsed)
-            parsed = _clean_graph(parsed)
-            parsed = _ensure_connected(parsed)
-
-            # Validate the diagram covers every component the documentation names.
-            # If the model dropped any, run one corrective pass so the diagram and
-            # the documentation stay in sync instead of silently diverging.
-            if documentation:
-                doc_components = _extract_doc_components(documentation)
-                missing = _find_missing_components(doc_components, parsed.get("nodes", []))
-                if missing:
-                    parsed = await _repair_missing_components(
-                        parsed, documentation, missing, provider, model_name, api_key, api_url
+        while True:
+            try:
+                raw = await asyncio.wait_for(asyncio.shield(llm_task), timeout=HEARTBEAT_INTERVAL_SECONDS)
+                break
+            except asyncio.TimeoutError:
+                elapsed += HEARTBEAT_INTERVAL_SECONDS
+                # Small buffer past DRAW_TIMEOUT_SECONDS so litellm's own
+                # timeout (which the task is already racing) gets first
+                # chance to raise its own, more specific error; this is the
+                # backstop in case it doesn't.
+                if elapsed >= DRAW_TIMEOUT_SECONDS + 15:
+                    llm_task.cancel()
+                    # Name the model that ACTUALLY ran (post env-default/alias
+                    # resolution) — the old canned "e.g. mistral-nemotron"
+                    # wording named an example regardless of what really timed
+                    # out, which made this message useless for telling apart
+                    # "this specific model is genuinely too slow" from "the
+                    # request never reached the model I think it did".
+                    eff_provider, eff_model = resolve_effective_model(provider, api_key, model_name, api_url)
+                    logger.warning(
+                        "Draw Board timed out after %ss [requested provider=%r model=%r -> resolved %s/%s]",
+                        elapsed, provider, model_name, eff_provider, eff_model,
                     )
-
-            canonical = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
-            yield f"data: {json.dumps({'final': canonical})}\n\n"
-            full_response = canonical
-        except Exception as e:
-            # If repair fails, fall back to raw output; client may still recover.
-            print(f"[design_service] _safe_parse failed: {e}\nRaw response (first 500 chars): {full_response[:500]!r}")
-
-        # End of stream marker
-        yield "data: [DONE]\n\n"
-
-        # Save to cache after streaming is complete
-        # Only cache if it looks like valid JSON
-        if "{" in full_response and "}" in full_response:
-            response_cache.set(cache_payload, provider, model_name, full_response)
-            
+                    # eff_model ids already carry their own vendor prefix
+                    # (e.g. "nvidia/llama-3.1-nemotron-70b-instruct",
+                    # "mistralai/mistral-nemotron") — joining with eff_provider
+                    # via "/" would print a redundant "nvidia/nvidia/...".
+                    timeout_msg = (
+                        f'Generation timed out after {elapsed}s using {eff_provider} model '
+                        f'"{eff_model}". This model is too slow to finish a full diagram in '
+                        f'time — pick a faster one from the dropdown in Settings (the curated '
+                        f'list is verified fast) rather than a custom id.'
+                    )
+                    yield f"data: {json.dumps({'error': timeout_msg})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                yield f"data: {json.dumps({'progress': elapsed})}\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({ 'error': str(e) })}\n\n"
+        logger.error("Draw Board LLM call failed [%s/%s]: %s", provider, model_name, e)
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
         yield "data: [DONE]\n\n"
+        return
+
+    # Validate and repair the COMPLETE output — never something partial.
+    try:
+        parsed = _safe_parse(raw)
+        # _safe_parse only guarantees valid JSON syntax, not the right shape —
+        # a confused model can echo its own input (keys like "request"/
+        # "history"/"instruction") back as a syntactically valid object with
+        # no "nodes" array at all. Treating that as a successful draw would
+        # send the client a graph with nothing in it and no error either.
+        if not isinstance(parsed.get("nodes"), list):
+            raise ValueError(
+                "Model output was valid JSON but not a diagram (missing a "
+                "\"nodes\" array) — it likely echoed the request instead of "
+                "generating a design."
+            )
+        removed_ids = set(parsed.pop("removed_node_ids", None) or [])
+        parsed = _merge_preserve_existing(current_design, parsed, removed_ids)
+        parsed = _clean_graph(parsed)
+        parsed = _ensure_connected(parsed)
+
+        # Validate the diagram covers every component the documentation names.
+        # If the model dropped any, run one corrective pass so the diagram and
+        # the documentation stay in sync instead of silently diverging.
+        if documentation:
+            doc_components = _extract_doc_components(documentation)
+            missing = _find_missing_components(doc_components, parsed.get("nodes", []))
+            if missing:
+                parsed = await _repair_missing_components(
+                    parsed, documentation, missing, provider, model_name, api_key, api_url
+                )
+
+        canonical = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+        yield f"data: {json.dumps({'final': canonical})}\n\n"
+        response_cache.set(cache_payload, provider, model_name, canonical)
+    except Exception as e:
+        # No partial client-side buffer to fall back on any more (nothing was
+        # streamed), so the client MUST get an explicit error here — silently
+        # falling through to [DONE] would look identical to a frozen request.
+        logger.warning(
+            "_safe_parse failed: %s\nRaw response (first 500 chars): %r", e, (raw or "")[:500]
+        )
+        yield f"data: {json.dumps({'error': f'The model did not return a usable diagram: {e}'})}\n\n"
+
+    yield "data: [DONE]\n\n"

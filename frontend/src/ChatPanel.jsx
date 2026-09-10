@@ -1,55 +1,14 @@
-import { useState, useEffect, useRef, memo, useMemo } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { Send, Bot, User, Sparkles, RefreshCcw, ChevronLeft, ChevronRight, History, X, PenTool, Settings, Trash2, Search, CheckCircle, AlertTriangle, Mic, MicOff } from 'lucide-react';
 import { api, API_URL } from './config/api';
 import { secureGet, secureSet } from './utils/secureStorage';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
-// Memoized message bubble — only re-renders when the message text changes
-// This prevents all previous messages from re-rendering during streaming
-const ChatMessage = memo(({ msg, isStreaming }) => {
-  const mdComponents = useMemo(() => ({
-    code({ node, inline, className, children, ...props }) {
-      const match = /language-(\w+)/.exec(className || '');
-      return !inline && match ? (
-        <SyntaxHighlighter style={vscDarkPlus} language={match[1]} PreTag="div" {...props}>
-          {String(children).replace(/\n$/, '')}
-        </SyntaxHighlighter>
-      ) : (
-        <code className="bg-[#2c2d31] px-1 py-0.5 rounded text-blue-300" {...props}>{children}</code>
-      );
-    }
-  }), []);
-
-  return (
-    <div className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center border shadow-sm ${msg.role === 'user' ? 'bg-blue-600/20 border-blue-500/30 text-blue-400' : 'bg-[#1a1b1e] border-[#2c2d31] text-gray-300'}`}>
-        {msg.role === 'user' ? <User size={14} /> : <Bot size={14} />}
-      </div>
-      <div className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} max-w-[85%]`}>
-        <div className={`px-4 py-3 rounded-2xl text-[13px] xl:text-[14px] leading-relaxed shadow-sm w-full markdown-body ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-tr-[4px]' : 'bg-[#151618] border border-[#232427] text-gray-200 rounded-tl-[4px]'}`}>
-          {msg.text ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-              {msg.text}
-            </ReactMarkdown>
-          ) : (
-            isStreaming && msg.role === 'ai' && (
-              <span className="flex gap-1 items-center text-gray-500">
-                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay:'0ms'}}/>
-                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay:'150ms'}}/>
-                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay:'300ms'}}/>
-              </span>
-            )
-          )}
-        </div>
-      </div>
-    </div>
-  );
-});
-ChatMessage.displayName = 'ChatMessage';
+// react-markdown + remark-gfm + react-syntax-highlighter (ChatMessage.jsx)
+// are by far the heaviest slice of this bundle — split into their own chunk,
+// fetched only once the first message actually needs rendering, instead of
+// blocking initial paint on a brand-new chat session.
+const ChatMessage = lazy(() => import('./ChatMessage'));
 
 const initialMessage = {
   id: 1,
@@ -61,6 +20,27 @@ const generateSessionId = () => Math.random().toString(36).substr(2, 9) + Date.n
 
 let _msgCounter = 100;
 const nextId = () => ++_msgCounter;
+// Curated, periodically-verified model ids per provider. Free-text model
+// entry used to be the only option, which silently broke whenever a typo'd
+// id (or, for NVIDIA, a since-retired catalog id) 404'd against the
+// provider with no indication of *why* — the id just looked plausible.
+// A dropdown of ids we've actually confirmed still work removes that whole
+// failure class for the common case; "Custom…" keeps free text available
+// for anything not listed here.
+const CURATED_MODELS = {
+  openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'],
+  gemini: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'],
+  anthropic: ['claude-3-haiku-20240307', 'claude-3-5-sonnet-20240620'],
+  // Verified live by calling integrate.api.nvidia.com directly as of this
+  // writing — NVIDIA retires catalog ids with no notice (a bulk EOL on
+  // 2026-08-26 took out most "obvious" ids, this app's old default
+  // included), and its own model pages can lag the API's real state, so
+  // don't restock this from build.nvidia.com without testing the id against
+  // the API first. Re-check if "Custom…" starts getting used a lot.
+  nvidia: ['mistralai/mistral-nemotron', 'nvidia/llama-3.1-nemotron-70b-instruct', 'mistralai/mistral-large-2-instruct'],
+};
+const CUSTOM_MODEL_VALUE = '__custom__';
+
 const defaultLlmConfig = { provider: '', api_key: '', model_name: '', api_url: '' };
 const normalizeSavedLlmConfig = (config) => {
   if (!config) return defaultLlmConfig;
@@ -79,6 +59,26 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   const [drawing, setDrawing] = useState(false);
 
   const inputTextareaRef = useRef(null);
+
+  // Always-current mirrors of the canvas props, for code (drawBoard's wait
+  // loop below) that reads them after an `await` — by then the props this
+  // render closed over may be stale, since a background per-turn sync can
+  // have updated the canvas in the meantime.
+  const currentNodesRef = useRef(currentNodes);
+  currentNodesRef.current = currentNodes;
+  const currentEdgesRef = useRef(currentEdges);
+  currentEdgesRef.current = currentEdges;
+  // Counts chat turns whose background per-turn design sync (see handleSend)
+  // hasn't landed yet. drawBoard waits for this to hit 0 so it never
+  // finalizes a graph that's missing the very last thing just discussed.
+  const pendingSyncCountRef = useRef(0);
+  // The design JSON kept current turn-by-turn in the background — NOT drawn
+  // to the canvas until the user clicks Draw. { nodes, edges } or null if
+  // nothing has synced yet this session. Kept separate from currentNodes/
+  // currentEdges (what's actually rendered) on purpose: the user asked for
+  // the graph to only ever appear on an explicit Draw click, even though the
+  // JSON backing it is being built/updated continuously underneath.
+  const latestSyncedDesignRef = useRef(null);
 
   // Voice input — free, browser-native Web Speech API (Chrome/Edge/Opera/Brave only).
   // baseTextRef holds whatever was already in the textarea before this listening
@@ -117,6 +117,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   const [testMessage, setTestMessage] = useState('');
   const [llmConfig, setLlmConfig] = useState(defaultLlmConfig);
   const llmConfigLoaded = useRef(false);
+  // True while the Model Name field shows a free-text box instead of the
+  // curated dropdown — either the user picked "Custom…", or a previously
+  // saved config already holds a model id outside the curated list.
+  const [useCustomModel, setUseCustomModel] = useState(false);
 
   // Load the encrypted config once on mount. Loading is async (Web Crypto /
   // IndexedDB), so the settings form briefly shows defaults until this resolves.
@@ -125,7 +129,12 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     secureGet('sysaid_llm_config').then((saved) => {
       if (cancelled) return;
       llmConfigLoaded.current = true;
-      if (saved) setLlmConfig(normalizeSavedLlmConfig(saved));
+      if (saved) {
+        const normalized = normalizeSavedLlmConfig(saved);
+        setLlmConfig(normalized);
+        const curated = CURATED_MODELS[normalized.provider];
+        setUseCustomModel(!!curated && !!normalized.model_name && !curated.includes(normalized.model_name));
+      }
     });
     return () => { cancelled = true; };
   }, []);
@@ -147,6 +156,78 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     nodes: nodes.map(n => ({ id: n.id, data: n.data, type: n.type, position: n.position || { x: 0, y: 0 } })),
     edges: edges.map(e => ({ id: e.id, source: e.source, target: e.target }))
   });
+
+  // Turns the backend's {"nodes":[...],"edges":[...]} shape into safe
+  // ReactFlow nodes/edges. Returns null (and logs) on anything unusable
+  // instead of throwing, so a bad background sync never crashes the chat
+  // turn that carried it.
+  const sanitizeGraph = (parsed) => {
+    if (!parsed || !Array.isArray(parsed.nodes)) return null;
+    const safeNodes = parsed.nodes.map((n, i) => ({
+      ...n,
+      id: n.id || `node-${i}`,
+      type: 'archNode',
+      data: {
+        label: n.data?.label || 'Node',
+        description: n.data?.description || '',
+        systemType: n.data?.systemType || 'default'
+      }
+    }));
+    const safeEdges = (parsed.edges || []).map((e, i) => ({
+      ...e,
+      id: e.id || `edge-${i}`,
+      source: e.source || '',
+      target: e.target || ''
+    })).filter(e => e.source && e.target);
+    return { nodes: safeNodes, edges: safeEdges };
+  };
+
+  // Renders a graph JSON string onto the canvas (Draw button, or the
+  // fallback full-generation path when nothing has synced in the background
+  // yet). Keeps latestSyncedDesignRef in lockstep with whatever gets drawn,
+  // so the next chat turn's background sync builds on exactly what's on
+  // screen. Returns false on anything unusable.
+  const applyGraphJson = (jsonString, { persistNow = false } = {}) => {
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonString);
+    } catch (err) {
+      console.error('Design graph JSON parse failed:', err, jsonString.slice(0, 200));
+      return false;
+    }
+    const safe = sanitizeGraph(parsed);
+    if (!safe) {
+      console.error('Design graph JSON missing nodes array:', jsonString.slice(0, 200));
+      return false;
+    }
+    onGraphUpdate(safe.nodes, safe.edges);
+    latestSyncedDesignRef.current = safe;
+    if (persistNow) {
+      if (saveTimeout.current) clearTimeout(saveTimeout.current);
+      persistSession({ nodes: safe.nodes, edges: safe.edges });
+    }
+    return true;
+  };
+
+  // Background-only counterpart: parses/sanitizes a per-turn design sync and
+  // stashes it in latestSyncedDesignRef WITHOUT touching the canvas — the
+  // graph should only ever appear when the user clicks Draw, even though the
+  // JSON behind it is kept current after every reply.
+  const storeSyncedDesign = (jsonString) => {
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonString);
+    } catch (err) {
+      console.error('Background design sync JSON parse failed:', err, jsonString.slice(0, 200));
+      return;
+    }
+    const safe = sanitizeGraph(parsed);
+    if (!safe) {
+      console.error('Background design sync JSON missing nodes array:', jsonString.slice(0, 200));
+      return;
+    }
+    latestSyncedDesignRef.current = safe;
+  };
 
 
   // Persists a session immediately, bypassing the debounce below. Accepts
@@ -211,6 +292,9 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       setSessionTitle(res.data.title);
       setMessages(res.data.messages);
       onGraphUpdate(res.data.nodes || [], res.data.edges || []);
+      // The loaded board is the known-good baseline going forward — future
+      // background syncs in this session build on top of it.
+      latestSyncedDesignRef.current = { nodes: res.data.nodes || [], edges: res.data.edges || [] };
       setShowHistory(false);
     } catch (e) {
       alert("Failed to load session");
@@ -241,6 +325,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     setSessionId(generateSessionId());
     setSessionTitle('New Architecture');
     setMessages([initialMessage]);
+    latestSyncedDesignRef.current = null;
     onReset();
   };
 
@@ -280,11 +365,23 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     setMessages((prev) => [...prev, { id: userMsgId, role: 'user', text: textToSend }, { id: aiMessageId, role: 'ai', text: '' }]);
     setInputValue('');
     setLoading(true);
+    pendingSyncCountRef.current += 1;
 
     try {
+      // Base the backend's sync on the latest background JSON if we have one
+      // — it can already be ahead of what's on screen, since the canvas only
+      // updates on an explicit Draw. Falls back to the canvas itself before
+      // anything has synced yet (e.g. the very first message).
+      const syncBase = latestSyncedDesignRef.current
+        ? stripGraphData(latestSyncedDesignRef.current.nodes, latestSyncedDesignRef.current.edges)
+        : stripGraphData(currentNodesRef.current, currentEdgesRef.current);
       const payload = {
         prompt: textToSend,
         chat_history: getChatHistory(),
+        // Lets the backend sync the design graph against what already
+        // exists instead of guessing from scratch each turn — see the
+        // `design` event handling below.
+        current_design: syncBase,
         ...llmConfig
       };
 
@@ -294,6 +391,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
           'Content-Type': 'application/json',
           'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
         },
+        // Backend routes now identify the calling user (see get_current_user),
+        // which reads the session cookie set by /auth/google. A cross-origin
+        // fetch() doesn't send cookies unless told to.
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
@@ -321,6 +422,31 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
             if (!data || data === '[DONE]') continue;
             let textChunk = '';
             try { textChunk = JSON.parse(data); } catch (e) { textChunk = data; }
+            if (textChunk && typeof textChunk === 'object' && textChunk.error) {
+              aiText += `\n\n_Error: ${textChunk.error}_`;
+              setMessages((prev) => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
+              continue;
+            }
+            // The reply text is fully streamed at this point — the backend
+            // now moves on to a much slower background design sync (see
+            // below) before it closes the stream. Re-enable input now
+            // instead of leaving it disabled for that extra 5-50s, which
+            // read as a hang. The read loop below keeps running in the
+            // background to catch the design update when it arrives.
+            if (textChunk && typeof textChunk === 'object' && textChunk.text_done) {
+              setLoading(false);
+              continue;
+            }
+            // The backend syncs the design JSON after every turn (add/replace/
+            // remove components as the discussion evolves) so it's already
+            // current by the time the user clicks Draw — but it's kept out of
+            // the canvas until then; the user only wants the graph to appear
+            // on an explicit Draw click. Silent on failure — this is a
+            // background enhancement, never something to interrupt chat over.
+            if (textChunk && typeof textChunk === 'object' && typeof textChunk.design === 'string') {
+              storeSyncedDesign(textChunk.design);
+              continue;
+            }
             if (textChunk) {
               aiText += textChunk;
               setMessages((prev) => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
@@ -332,6 +458,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       setMessages((prev) => [...prev, { id: nextId(), role: 'ai', text: `Error: ${error.message}` }]);
     } finally {
       setLoading(false);
+      pendingSyncCountRef.current = Math.max(0, pendingSyncCountRef.current - 1);
     }
   };
 
@@ -341,9 +468,48 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     setDrawing(true);
 
     try {
+      // Wait for any chat turn's background design sync (see handleSend) to
+      // land first — otherwise Draw could finalize a graph that's missing
+      // the very last thing just discussed. Capped so a stuck sync can't
+      // hang Draw forever; past the cap it just falls through to the full
+      // regeneration below, which is a safe (if slower) superset either way.
+      const SYNC_WAIT_MS = 60000;
+      const waitStart = Date.now();
+      while (pendingSyncCountRef.current > 0 && Date.now() - waitStart < SYNC_WAIT_MS) {
+        await new Promise((r) => setTimeout(r, 300));
+      }
+
+      // The design JSON is already kept in sync with the conversation turn
+      // by turn (see the `design` events handled in handleSend) — it's just
+      // been sitting in the background, not on the canvas, since the graph
+      // is only meant to appear on this explicit click. Drawing it now is
+      // rendering that already-built JSON, not asking the model to build the
+      // whole thing over again from scratch — which is what made this slow
+      // and timeout-prone before. Only fall back to a full LLM generation
+      // below if nothing has synced in the background yet.
+      const backgroundDesign = latestSyncedDesignRef.current;
+      if (backgroundDesign && backgroundDesign.nodes && backgroundDesign.nodes.length > 0) {
+        onGraphUpdate(backgroundDesign.nodes, backgroundDesign.edges || []);
+        if (saveTimeout.current) clearTimeout(saveTimeout.current);
+        await persistSession({ nodes: backgroundDesign.nodes, edges: backgroundDesign.edges || [] });
+        setInputValue('');
+        return;
+      }
+      // Nothing synced in the background (e.g. every prior sync attempt
+      // failed) but the canvas already has something drawn from earlier —
+      // just re-confirm/re-layout what's already there instead of a fresh
+      // generation.
+      if (currentNodesRef.current && currentNodesRef.current.length > 0) {
+        onGraphUpdate(currentNodesRef.current, currentEdgesRef.current);
+        if (saveTimeout.current) clearTimeout(saveTimeout.current);
+        await persistSession({ nodes: currentNodesRef.current, edges: currentEdgesRef.current });
+        setInputValue('');
+        return;
+      }
+
       const payload = {
         prompt: "Draw the final confirmed board logic based on our chat history.",
-        current_design: stripGraphData(currentNodes, currentEdges),
+        current_design: stripGraphData(currentNodesRef.current, currentEdgesRef.current),
         chat_history: getFullChatHistory(),
         documentation: getLatestDocumentation(),
         ...llmConfig
@@ -355,6 +521,10 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
           'Content-Type': 'application/json',
           'X-API-Key': import.meta.env.VITE_BACKEND_API_KEY || ''
         },
+        // Backend routes now identify the calling user (see get_current_user),
+        // which reads the session cookie set by /auth/google. A cross-origin
+        // fetch() doesn't send cookies unless told to.
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
@@ -364,10 +534,27 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       onGenerationProgress?.(0);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      let fullJson = '';
+      // The backend now sends exactly one of three events, never raw partial
+      // text: {progress: seconds} while it's still working, {final: json}
+      // once the model's COMPLETE output has been validated as a real
+      // diagram, or {error: message} if it wasn't. Nothing to reassemble or
+      // salvage client-side any more.
       let finalJson = null;
+      let errorMessage = null;
       let lineBuffer = '';
-      let tokenCount = 0;
+
+      const handleEvent = (data) => {
+        if (!data || data === '[DONE]') return;
+        let parsed;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // not one of our JSON events — ignore rather than guess
+        }
+        if (parsed?.error) errorMessage = parsed.error;
+        else if (typeof parsed?.final === 'string') finalJson = parsed.final;
+        else if (typeof parsed?.progress === 'number') onGenerationProgress?.(parsed.progress);
+      };
 
       while (true) {
         const { value, done } = await reader.read();
@@ -378,162 +565,27 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
         lineBuffer = lines.pop(); // keep incomplete line buffered
 
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (!data) continue;
-
-          if (data === '[DONE]') {
-            break;
-          }
-
-          if (data.startsWith('{') || data.startsWith('"')) {
-            let parsedData;
-            try {
-              parsedData = JSON.parse(data);
-            } catch (e) {
-              parsedData = data;
-            }
-
-            if (parsedData && typeof parsedData === 'object' && parsedData.error) {
-              console.error('Graph generation error:', parsedData.error);
-              alert(`Draw failed: ${parsedData.error}`);
-              return;
-            }
-
-            if (parsedData && typeof parsedData === 'object' && typeof parsedData.final === 'string') {
-              // Server-repaired canonical JSON — replaces the accumulated buffer,
-              // it does not get appended (it already contains everything so far).
-              finalJson = parsedData.final;
-            } else {
-              fullJson += typeof parsedData === 'string' ? parsedData : String(parsedData);
-            }
-          } else {
-            fullJson += data;
-          }
-          tokenCount += 1;
-          onGenerationProgress?.(tokenCount);
+          if (line.startsWith('data: ')) handleEvent(line.slice(6).trim());
         }
       }
+      if (lineBuffer.startsWith('data: ')) handleEvent(lineBuffer.slice(6).trim());
 
-      if (lineBuffer) {
-        const remaining = lineBuffer.trim();
-        if (remaining.startsWith('data: ')) {
-          const data = remaining.slice(6).trim();
-          if (data && data !== '[DONE]') {
-            if (data.startsWith('{') || data.startsWith('"')) {
-              let parsedData;
-              try { parsedData = JSON.parse(data); } catch (e) { parsedData = data; }
-              if (parsedData && typeof parsedData === 'object' && parsedData.error) {
-                console.error('Graph generation error:', parsedData.error);
-                alert(`Draw failed: ${parsedData.error}`);
-                return;
-              }
-              if (parsedData && typeof parsedData === 'object' && typeof parsedData.final === 'string') {
-                finalJson = parsedData.final;
-              } else {
-                fullJson += typeof parsedData === 'string' ? parsedData : String(parsedData);
-              }
-            } else {
-              fullJson += data;
-            }
-          }
-        }
+      if (errorMessage) {
+        console.error('Graph generation error:', errorMessage);
+        alert(`Draw failed: ${errorMessage}`);
+        return;
+      }
+      if (!finalJson) {
+        console.error('Graph generation ended with no result and no error.');
+        alert('Draw failed: no response from the server. Please try again.');
+        return;
       }
 
-      if (finalJson !== null) fullJson = finalJson;
-
-      const extractJson = (text) => {
-        let s = text.replace(/```json/gi, '').replace(/```/g, '').trim();
-        s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
-
-        let inString = false;
-        let escape = false;
-        let depth = 0;
-        let start = -1;
-        let lastObject = '';
-
-        for (let i = 0; i < s.length; i += 1) {
-          const ch = s[i];
-          if (escape) {
-            escape = false;
-            continue;
-          }
-          if (ch === '\\') {
-            if (inString) escape = true;
-            continue;
-          }
-          if (ch === '"') {
-            inString = !inString;
-            continue;
-          }
-          if (inString) continue;
-
-          if (ch === '{') {
-            if (depth === 0) start = i;
-            depth += 1;
-          } else if (ch === '}') {
-            if (depth > 0) {
-              depth -= 1;
-              if (depth === 0 && start !== -1) {
-                lastObject = s.slice(start, i + 1);
-                start = -1;
-              }
-            }
-          }
-        }
-
-        if (lastObject) {
-          return lastObject;
-        }
-
-        const firstStart = s.indexOf('{');
-        const lastEnd = s.lastIndexOf('}');
-        if (firstStart !== -1 && lastEnd !== -1 && lastEnd > firstStart) {
-          return s.slice(firstStart, lastEnd + 1);
-        }
-
-        return s;
-      };
-
-      const cleanedJson = extractJson(fullJson);
-      if (cleanedJson.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(cleanedJson);
-          if (parsed && Array.isArray(parsed.nodes)) {
-            const safeNodes = parsed.nodes.map((n, i) => ({
-              ...n,
-              id: n.id || `node-${i}`,
-              type: 'archNode',
-              data: {
-                label: n.data?.label || 'Node',
-                description: n.data?.description || '',
-                systemType: n.data?.systemType || 'default'
-              }
-            }));
-            const safeEdges = (parsed.edges || []).map((e, i) => ({
-              ...e,
-              id: e.id || `edge-${i}`,
-              source: e.source || '',
-              target: e.target || ''
-            })).filter(e => e.source && e.target);
-            onGraphUpdate(safeNodes, safeEdges);
-            // Save immediately — don't rely on the 5s debounce, which can be
-            // cancelled if the user switches chats right after drawing.
-            if (saveTimeout.current) clearTimeout(saveTimeout.current);
-            persistSession({ nodes: safeNodes, edges: safeEdges });
-          } else {
-            throw new Error('Payload did not contain nodes array');
-          }
-        } catch (err) {
-          console.error('JSON parse failed:', err, cleanedJson.slice(0, 200));
-          alert('Draw failed: generated output was not valid graph JSON. See console for details.');
-        }
-      } else if (fullJson.includes('[Error:')) {
-        console.error('Graph generation error:', fullJson);
-        alert(`Draw failed: ${fullJson.trim()}`);
-      } else {
-        console.error('Graph generation returned non-JSON output:', fullJson);
-        alert('Draw failed: generated output was not valid JSON.');
+      // Save immediately -- don't rely on the 5s debounce, which can be
+      // cancelled if the user switches chats right after drawing.
+      if (!applyGraphJson(finalJson, { persistNow: true })) {
+        alert('Draw failed: server returned an unusable diagram. See console for details.');
+        return;
       }
 
       setInputValue('');
@@ -556,7 +608,16 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       setTestMessage('This model needs extra time to connect, please wait…');
     }, 8000);
     try {
-      const res = await api.post('/health/llm', llmConfig, { timeout: 26000 });
+      // A 502 here always means "the upstream provider rejected the
+      // request" (bad key/model), never a transient gateway blip — retrying
+      // it 3x just re-sends the same bad request and triples how long the
+      // user waits to see the (correct) error, so opt this call out.
+      // 65s > backend's HEALTH_TIMEOUT_SECONDS (60s) so the backend's own
+      // timeout always fires first and returns the real reason — otherwise
+      // this axios timeout could cut the request off first and report a
+      // generic client-side timeout instead of NVIDIA's actual response
+      // (e.g. a cold-started free-tier NIM endpoint that's simply slow).
+      const res = await api.post('/health/llm', llmConfig, { timeout: 65000, 'axios-retry': { retries: 0 } });
       if (res.data?.status !== 'ok') {
         throw new Error(res.data?.message || 'Connection failed');
       }
@@ -632,7 +693,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
           <div className="flex-1 overflow-y-auto space-y-4 custom-scrollbar text-sm text-gray-300">
             <div className="flex flex-col gap-1.5">
               <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold">Provider</label>
-              <select value={llmConfig.provider} onChange={(e) => setLlmConfig({ ...llmConfig, provider: e.target.value, model_name: '' })} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500">
+              <select value={llmConfig.provider} onChange={(e) => { setLlmConfig({ ...llmConfig, provider: e.target.value, model_name: '' }); setUseCustomModel(false); }} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500">
                 <option value="">Fast backend default</option>
                 <option value="ollama">Ollama (Local / Free)</option>
                 <option value="openai">OpenAI (ChatGPT)</option>
@@ -653,7 +714,42 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
             )}
             <div className="flex flex-col gap-1.5">
               <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold">Model Name {llmConfig.provider === 'ollama' && '(e.g. llama3.2:1b)'}</label>
-              <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o-mini' : llmConfig.provider === 'gemini' ? 'gemini-1.5-flash' : llmConfig.provider === 'anthropic' ? 'claude-3-haiku-20240307' : llmConfig.provider === 'nvidia' ? 'meta/llama-3.1-8b-instruct' : llmConfig.provider === 'ollama' ? 'llama3.2:1b' : 'Backend default'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
+              {CURATED_MODELS[llmConfig.provider] && !useCustomModel ? (
+                <select
+                  value={llmConfig.model_name || ''}
+                  onChange={(e) => {
+                    if (e.target.value === CUSTOM_MODEL_VALUE) { setUseCustomModel(true); return; }
+                    setLlmConfig({ ...llmConfig, model_name: e.target.value });
+                  }}
+                  className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500"
+                >
+                  <option value="">Fast backend default</option>
+                  {CURATED_MODELS[llmConfig.provider].map((m) => <option key={m} value={m}>{m}</option>)}
+                  <option value={CUSTOM_MODEL_VALUE}>Custom…</option>
+                </select>
+              ) : (
+                <>
+                  <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o-mini' : llmConfig.provider === 'gemini' ? 'gemini-1.5-flash' : llmConfig.provider === 'anthropic' ? 'claude-3-haiku-20240307' : llmConfig.provider === 'nvidia' ? 'mistralai/mistral-nemotron' : llmConfig.provider === 'ollama' ? 'llama3.2:1b' : 'Backend default'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
+                  {CURATED_MODELS[llmConfig.provider] && (
+                    <button type="button" onClick={() => { setUseCustomModel(false); setLlmConfig({ ...llmConfig, model_name: '' }); }} className="text-[11px] text-blue-400 hover:text-blue-300 text-left">
+                      ← back to the verified model list
+                    </button>
+                  )}
+                  {llmConfig.provider === 'nvidia' && (
+                    <p className="text-[11px] text-gray-500">
+                      Must match a live id at build.nvidia.com/models exactly — NVIDIA retires catalog ids without notice.
+                    </p>
+                  )}
+                  <p className="text-[11px] text-amber-500/80 flex items-start gap-1">
+                    <AlertTriangle size={11} className="shrink-0 mt-0.5" />
+                    Custom models aren't speed-tested. Draw Board needs a model
+                    that returns a large JSON diagram quickly — a big or
+                    "reasoning" model can time out generating one even if it
+                    chats fine. If Draw keeps failing, switch back to a
+                    verified model above.
+                  </p>
+                </>
+              )}
             </div>
             {(llmConfig.provider === 'openai-compatible' || llmConfig.provider === 'ollama') && (
               <div className="flex flex-col gap-1.5">
@@ -696,9 +792,16 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 xl:p-5 space-y-6 custom-scrollbar bg-gradient-to-b from-[#050505] to-[#0A0B0E] select-text">
-        {messages.map((msg) => (
-          <ChatMessage key={msg.id} msg={msg} isStreaming={loading} />
-        ))}
+        <Suspense fallback={messages.map((msg) => (
+          <div key={msg.id} className="flex gap-3 animate-pulse">
+            <div className="flex-shrink-0 w-8 h-8 rounded-full bg-[#1a1b1e] border border-[#2c2d31]" />
+            <div className="h-10 flex-1 max-w-[85%] rounded-2xl bg-[#151618] border border-[#232427]" />
+          </div>
+        ))}>
+          {messages.map((msg) => (
+            <ChatMessage key={msg.id} msg={msg} isStreaming={loading} />
+          ))}
+        </Suspense>
 
         {messages.length === 1 && (
           <div className="mt-8 flex flex-col gap-2 px-2">

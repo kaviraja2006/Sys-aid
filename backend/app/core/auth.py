@@ -5,6 +5,7 @@ POST /auth/google. We verify it with Google, upsert the user, and issue an
 opaque server-side session token (stored in Postgres, handed to the browser
 as an httpOnly cookie). No passwords are ever stored.
 """
+import hashlib
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from fastapi import Request, Response, HTTPException, status
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import async_session_maker
 from app.models.db_models import User, Session as DbSession
@@ -22,6 +24,13 @@ SESSION_COOKIE = "session_token"
 SESSION_TTL_DAYS = 30
 
 _google_request = google_requests.Request()
+
+
+def _hash_token(token: str) -> str:
+    """Sessions are looked up by this hash, never by the raw bearer token, so
+    a read of the sessions table (backup leak, DB access) doesn't hand over
+    live logins directly."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def verify_google_token(credential: str) -> dict:
@@ -60,9 +69,9 @@ async def create_session(user_id: str) -> str:
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
     async with async_session_maker() as db:
-        db.add(DbSession(token=token, user_id=user_id, expires_at=expires_at))
+        db.add(DbSession(token=_hash_token(token), user_id=user_id, expires_at=expires_at))
         await db.commit()
-    return token
+    return token  # raw token leaves the server only in the cookie — never stored
 
 
 def set_session_cookie(response: Response, token: str, request: Request) -> None:
@@ -77,14 +86,34 @@ def set_session_cookie(response: Response, token: str, request: Request) -> None
     )
 
 
+async def _lookup_session(db: AsyncSession, raw_token: str) -> DbSession | None:
+    """Look up by hash first — the current, post-hardening format. Falls back
+    to a raw-token match for rows written before session hashing was added,
+    and silently upgrades that row to hashed on the way out. This is a
+    lazy/self-healing migration: every existing login keeps working, and
+    every session still active 30 days from now (the TTL) has been touched
+    at least once and is stored hashed, with no forced logout and no
+    separate backfill migration needed."""
+    result = await db.execute(select(DbSession).where(DbSession.token == _hash_token(raw_token)))
+    db_session = result.scalar_one_or_none()
+    if db_session:
+        return db_session
+
+    result = await db.execute(select(DbSession).where(DbSession.token == raw_token))
+    db_session = result.scalar_one_or_none()
+    if db_session:
+        db_session.token = _hash_token(raw_token)
+        await db.commit()
+    return db_session
+
+
 async def get_current_user(request: Request) -> User:
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
     async with async_session_maker() as db:
-        result = await db.execute(select(DbSession).where(DbSession.token == token))
-        db_session = result.scalar_one_or_none()
+        db_session = await _lookup_session(db, token)
         if not db_session or db_session.expires_at < datetime.now(timezone.utc):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired or invalid")
 
@@ -95,13 +124,45 @@ async def get_current_user(request: Request) -> User:
         return user
 
 
+async def get_current_user_optional(request: Request) -> User | None:
+    """Same lookup as get_current_user, but returns None instead of raising
+    when there's no valid session — for routes that behave correctly either
+    way (e.g. RAG context scoping falls back to the shared base corpus) and
+    shouldn't start hard-rejecting callers that don't log in."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+
+    async with async_session_maker() as db:
+        db_session = await _lookup_session(db, token)
+        if not db_session or db_session.expires_at < datetime.now(timezone.utc):
+            return None
+
+        result = await db.execute(select(User).where(User.id == db_session.user_id))
+        return result.scalar_one_or_none()
+
+
 async def delete_session(request: Request, response: Response) -> None:
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         async with async_session_maker() as db:
-            result = await db.execute(select(DbSession).where(DbSession.token == token))
-            db_session = result.scalar_one_or_none()
+            db_session = await _lookup_session(db, token)
             if db_session:
                 await db.delete(db_session)
                 await db.commit()
     response.delete_cookie(SESSION_COOKIE)
+
+
+async def cleanup_expired_sessions() -> int:
+    """Delete every session row past its expires_at. Expired sessions were
+    previously never removed — only ignored on lookup — so the table grew
+    without bound. Returns the number of rows deleted (called periodically
+    from main.py's lifespan, and safe to call any time)."""
+    from sqlalchemy import delete as sql_delete
+
+    async with async_session_maker() as db:
+        result = await db.execute(
+            sql_delete(DbSession).where(DbSession.expires_at < datetime.now(timezone.utc))
+        )
+        await db.commit()
+        return result.rowcount or 0
