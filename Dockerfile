@@ -14,8 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY backend/ .
 
-# Create necessary directories
-RUN mkdir -p app/data/chats app/data/chroma_db
+# Create necessary directories (chats now live in Postgres; chroma_db_v2 is
+# the RAG vector store's on-disk cache — see app/core/rag.py)
+RUN mkdir -p app/data/chroma_db_v2
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

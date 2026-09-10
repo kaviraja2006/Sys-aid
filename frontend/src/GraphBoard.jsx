@@ -177,7 +177,11 @@ function GraphBoard({ nodes, edges, onNodesChange, onEdgesChange, setEdges, onAu
             <div className="bg-[#151618] border border-[#2c2d31] rounded-xl p-6 text-center backdrop-blur-md shadow-xl">
               <RefreshCcw className="animate-spin text-blue-400 mx-auto mb-3" />
               <p className="text-gray-300 text-sm">Drawing architecture...</p>
-              <p className="text-gray-500 text-xs mt-1">{genTokens} tokens generated</p>
+              {/* genTokens is now elapsed seconds (a heartbeat from the backend
+                  while it waits on one single-shot LLM call), not a live token
+                  count — the graph isn't streamed piece by piece any more, it's
+                  validated whole before ever reaching the client. */}
+              <p className="text-gray-500 text-xs mt-1">{genTokens > 0 ? `${genTokens}s elapsed` : 'starting…'}</p>
             </div>
           </div>
         )}

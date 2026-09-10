@@ -1,6 +1,13 @@
 import asyncio
 import logging
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load backend/.env before any app module reads os.environ (app.core.db
+# raises at import time if DATABASE_URL isn't set).
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 if sys.platform != "win32":
     try:

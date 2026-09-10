@@ -13,3 +13,4 @@ alembic==1.14.0
 asyncpg==0.31.0
 redis==8.1.0
 google-auth==2.56.2
+python-dotenv==1.0.1

@@ -28,7 +28,10 @@ _SSE_HEADERS = {
 @limiter.limit("10/minute")
 async def chat_endpoint(request: Request, req: GenerateRequest, user: User | None = Depends(get_current_user_optional)):
     return StreamingResponse(
-        handle_chat_stream(req.prompt, req.chat_history, req, user_id=user.id if user else None),
+        handle_chat_stream(
+            req.prompt, req.chat_history, req, user_id=user.id if user else None,
+            current_design=req.current_design,
+        ),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
