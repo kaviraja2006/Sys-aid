@@ -2,12 +2,16 @@ import os
 import json
 import logging
 import threading
-import chromadb
 import shutil
 import hashlib
 import gc
-from chromadb.utils import embedding_functions
-from chromadb.config import Settings
+
+# chromadb (and its onnxruntime/numpy/tokenizers dependency tree) is
+# deliberately NOT imported at module scope — it's pulled in lazily inside
+# _init_rag_impl(), only when RAG actually turns on. This module is imported
+# unconditionally from app.main at startup, so a top-level `import chromadb`
+# would pay that memory cost on every boot even with RAG disabled — not
+# viable on a 512Mi free-tier deploy.
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +19,17 @@ DB_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db_v2")
 KNOWLEDGE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "knowledge.json")
 MANIFEST_FILE = os.path.join(DB_DIR, "knowledge_manifest.json")
 
+_ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+
 # RAG loads an ONNX embedding model (all-MiniLM-L6-v2) plus onnxruntime into
 # memory. On memory-constrained deployments (e.g. Render's 512Mi free tier)
-# that alone can be enough to OOM the process. Default OFF so a deploy boots
-# cleanly; opt in by setting RAG_ENABLED=true where memory allows it.
-RAG_ENABLED = os.getenv("RAG_ENABLED", "false").strip().lower() == "true"
+# that alone can be enough to OOM the process, so it's forced OFF in
+# production outright — RAG_ENABLED is not honored there. Opt in locally
+# (ENVIRONMENT unset/not "production") by setting RAG_ENABLED=true.
+if _ENVIRONMENT == "production":
+    RAG_ENABLED = False
+else:
+    RAG_ENABLED = os.getenv("RAG_ENABLED", "false").strip().lower() == "true"
 
 # Use single global client
 _chroma_client = None
@@ -27,7 +37,7 @@ _collection = None
 _rag_available = False
 _init_lock = threading.Lock()
 _init_attempted = False
-_chroma_settings = Settings(anonymized_telemetry=False)
+_chroma_settings = None  # built lazily in _init_rag_impl, once chromadb is imported
 
 
 def _file_sha256(path: str) -> str:
@@ -89,11 +99,18 @@ def _init_rag_impl():
     Initialize RAG system with graceful fallback.
     If ChromaDB fails, RAG is disabled but app continues to work.
     """
-    global _chroma_client, _collection, _rag_available
+    global _chroma_client, _collection, _rag_available, _chroma_settings
+
+    import chromadb
+    from chromadb.utils import embedding_functions
+    from chromadb.config import Settings
+
+    if _chroma_settings is None:
+        _chroma_settings = Settings(anonymized_telemetry=False)
 
     try:
         os.makedirs(os.path.dirname(DB_DIR), exist_ok=True)
-        
+
         # Initialize Persistent Client
         _chroma_client = chromadb.PersistentClient(path=DB_DIR, settings=_chroma_settings)
         
