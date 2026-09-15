@@ -1,7 +1,7 @@
 import axios from 'axios';
 import axiosRetry from 'axios-retry';
 
-const PROD_FALLBACK_API_URL = 'https://sys-aid-1.onrender.com';
+const PROD_FALLBACK_API_URL = 'https://sys-aid-ds6s.onrender.com';
 const isLocalHost =
   typeof window !== 'undefined' &&
   (window.location.hostname === 'localhost' ||
