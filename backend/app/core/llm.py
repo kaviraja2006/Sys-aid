@@ -76,14 +76,19 @@ SLOW_MODEL_ALIASES = {
     "ollama": {"llama3": "llama3.2:1b"},
 }
 
-CHAT_TIMEOUT_SECONDS = float(os.getenv("LLM_CHAT_TIMEOUT_SECONDS", "30"))
-GENERATE_TIMEOUT_SECONDS = float(os.getenv("LLM_GENERATE_TIMEOUT_SECONDS", "60"))
 # NVIDIA's free-tier hosted NIM endpoints (build.nvidia.com) spin their
 # container down after inactivity — the first call after a cold container
-# can take 45-60s+ to respond even though the key/model are both fine. 25s
-# was cutting that off mid-cold-start and reporting a false "connection
-# failed". 60s covers a cold start; a genuinely dead key/model still fails
-# fast (401/404) long before this ever kicks in.
+# can take 45-60s+ to respond even though the key/model are both fine. This
+# used to only be accounted for on the health-check timeout (below); actual
+# chat turns still used a 30s default and would hard-fail mid-cold-start
+# with a confusing timeout even though the very same call would have
+# succeeded on a second try. 60s covers a cold start on chat too; a
+# genuinely dead key/model still fails fast (401/404) long before this ever
+# kicks in — now that asyncio.wait_for actually enforces it (see call_llm /
+# call_llm_stream), raising this no longer means a truly stuck call hangs
+# any longer than before, it just gives a slow-but-alive one a fair chance.
+CHAT_TIMEOUT_SECONDS = float(os.getenv("LLM_CHAT_TIMEOUT_SECONDS", "60"))
+GENERATE_TIMEOUT_SECONDS = float(os.getenv("LLM_GENERATE_TIMEOUT_SECONDS", "60"))
 HEALTH_TIMEOUT_SECONDS = float(os.getenv("LLM_HEALTH_TIMEOUT_SECONDS", "60"))
 # Below this, a slow-but-alive connection is treated as normal; past it we
 # start warning the caller the model just needs more time (see routes.py).

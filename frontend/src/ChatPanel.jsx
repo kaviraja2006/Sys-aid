@@ -367,6 +367,17 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     setLoading(true);
     pendingSyncCountRef.current += 1;
 
+    // Free-tier providers (e.g. NVIDIA NIM) can take up to ~60s to respond
+    // on a cold-started container — the request is genuinely still working,
+    // not frozen, but the typing dots alone don't say that. Swap in a
+    // one-time note past the point where a warm model would already have
+    // started streaming; cleared the moment real text starts arriving below.
+    const warmupNoticeTimer = setTimeout(() => {
+      setMessages((prev) => prev.map(msg => (msg.id === aiMessageId && !msg.text)
+        ? { ...msg, text: '_Still waiting on the model — a cold-started free-tier endpoint can take up to a minute on its first response…_' }
+        : msg));
+    }, 8000);
+
     try {
       // Base the backend's sync on the latest background JSON if we have one
       // — it can already be ahead of what's on screen, since the canvas only
@@ -457,6 +468,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
     } catch (error) {
       setMessages((prev) => [...prev, { id: nextId(), role: 'ai', text: `Error: ${error.message}` }]);
     } finally {
+      clearTimeout(warmupNoticeTimer);
       setLoading(false);
       pendingSyncCountRef.current = Math.max(0, pendingSyncCountRef.current - 1);
     }
