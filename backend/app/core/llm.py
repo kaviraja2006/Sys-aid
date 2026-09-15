@@ -42,6 +42,11 @@ FAST_DEFAULT_MODELS = {
     # doesn't) — don't swap it back to a "looks right" id without doing the
     # same check, since NVIDIA's own model pages can lag the API's real state.
     "nvidia": "mistralai/mistral-nemotron",
+    # OpenRouter's free catalog turns over too — confirmed live against
+    # https://openrouter.ai/api/v1/models (public, no auth needed) as of
+    # this writing. liquid/lfm-2.5-2.6b is the smallest/fastest of their
+    # current `:free` models — re-check that endpoint before swapping it.
+    "openrouter": "liquid/lfm-2.5-2.6b:free",
     "ollama": "llama3.2:1b",
 }
 
@@ -205,10 +210,19 @@ def _is_real_api_key(api_key: str) -> bool:
     return not api_key.lower().startswith(PLACEHOLDER_KEY_PREFIXES)
 
 
+_PROVIDER_ENV_VARS = {
+    "nvidia": "NVIDIA_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
 def _resolve_api_key(provider: str, api_key: str) -> str:
     """
     Resolve API key from request or environment variables (fallback for production).
-    
+
     Priority:
     1. Use provided api_key (from frontend settings)
     2. Fall back to environment variable based on provider
@@ -216,33 +230,20 @@ def _resolve_api_key(provider: str, api_key: str) -> str:
     """
     if _is_real_api_key(api_key):
         return api_key
-    
+
     # Map provider to environment variable name
-    env_map = {
-        "nvidia": "NVIDIA_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-    }
-    
-    env_var = env_map.get(provider)
+    env_var = _PROVIDER_ENV_VARS.get(provider)
     if env_var:
         env_api_key = _clean_env_value(os.getenv(env_var, ""))
         if _is_real_api_key(env_api_key):
             return env_api_key
-    
+
     # Fallback for local providers or no key available
     return "dummy-key"
 
 
 def _has_env_key(provider: str) -> bool:
-    env_map = {
-        "nvidia": "NVIDIA_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-    }
-    env_var = env_map.get(provider)
+    env_var = _PROVIDER_ENV_VARS.get(provider)
     return bool(env_var and _is_real_api_key(_clean_env_value(os.getenv(env_var, ""))))
 
 
@@ -251,7 +252,7 @@ def _configured_provider() -> str:
     if configured in ("ollama", "openai-compatible") or (configured and _has_env_key(configured)):
         return configured
 
-    for provider in ("openai", "nvidia", "gemini", "anthropic"):
+    for provider in ("openai", "nvidia", "openrouter", "gemini", "anthropic"):
         if _has_env_key(provider):
             return provider
 
@@ -377,6 +378,11 @@ def _resolve_litellm_args(provider: str, api_key: str, model_name: str, api_url:
             f"openai/{model_name}",
             "https://integrate.api.nvidia.com/v1",
         )
+    elif provider == "openrouter":
+        # litellm has a native "openrouter/" route (sets the api_base and
+        # OpenRouter's required attribution headers itself) — no api_base
+        # override needed, unlike nvidia/openai-compatible above.
+        return f"openrouter/{model_name}", None
     else:  # openai / openai-compatible
         return f"openai/{model_name or FAST_DEFAULT_MODELS['openai']}", api_url or None
 
