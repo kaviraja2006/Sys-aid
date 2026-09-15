@@ -426,11 +426,24 @@ async def call_llm(
         kwargs["api_base"] = api_base
 
     try:
-        response = await litellm.acompletion(**kwargs)
+        # litellm's own `timeout` kwarg doesn't reliably cut the connection
+        # short when a shared/custom httpx client is in play (see
+        # `_http_client` above, read timeout 120s) — it can let the request
+        # run to completion and only raise the Timeout error afterward,
+        # reporting the intended timeout but a much longer actual duration.
+        # asyncio.wait_for is a hard, independent cutoff that always fires
+        # on schedule regardless of what litellm/httpx do internally.
+        response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=kwargs["timeout"])
         result = response.choices[0].message.content
         if use_cache:
             response_cache.set(prompt, provider, model_name, result)
         return result
+    except asyncio.TimeoutError as e:
+        logger.error("LLM Timeout [%s/%s]: no response within %ss", provider, litellm_model, kwargs["timeout"])
+        raise RuntimeError(
+            f"{provider} did not respond within {kwargs['timeout']:.0f}s. The model/key are "
+            "reachable but too slow right now (often a cold-started free-tier endpoint) — try again."
+        ) from e
     except Exception as e:
         logger.error("LLM Error [%s/%s]: %s", provider, litellm_model, e)
         raise _friendlier_error(e, provider, litellm_model) from e
@@ -477,11 +490,22 @@ async def call_llm_stream(
         kwargs["api_base"] = api_base
 
     try:
-        response = await litellm.acompletion(**kwargs)
+        # See the matching comment in call_llm — litellm's `timeout` kwarg
+        # isn't a reliable cutoff with our shared httpx client, so bound the
+        # connect/first-response wait ourselves. Once streaming starts,
+        # callers (e.g. design_service's heartbeat loop) apply their own
+        # per-chunk timeout, so only the initial call needs guarding here.
+        response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=kwargs["timeout"])
         async for chunk in response:
             delta = chunk.choices[0].delta.content
             if delta:
                 yield delta
+    except asyncio.TimeoutError as e:
+        logger.error("LLM Stream Timeout [%s/%s]: no response within %ss", provider, litellm_model, kwargs["timeout"])
+        raise RuntimeError(
+            f"{provider} did not respond within {kwargs['timeout']:.0f}s. The model/key are "
+            "reachable but too slow right now (often a cold-started free-tier endpoint) — try again."
+        ) from e
     except Exception as e:
         logger.error("LLM Stream Error [%s/%s]: %s", provider, litellm_model, e)
         raise _friendlier_error(e, provider, litellm_model) from e
