@@ -44,9 +44,18 @@ FAST_DEFAULT_MODELS = {
     "nvidia": "mistralai/mistral-nemotron",
     # OpenRouter's free catalog turns over too — confirmed live against
     # https://openrouter.ai/api/v1/models (public, no auth needed) as of
-    # this writing. liquid/lfm-2.5-2.6b is the smallest/fastest of their
-    # current `:free` models — re-check that endpoint before swapping it.
-    "openrouter": "liquid/lfm-2.5-2.6b:free",
+    # this writing. NOT the smallest free model (liquid/lfm-2.5-2.6b) —
+    # this app asks for strict, schema-constrained JSON (design sync/Draw
+    # Board), and a 2.6B model was too weak for that in practice: it either
+    # produced unparsable output or was slow enough under OpenRouter's
+    # free-tier rate limiting that the background design sync silently
+    # failed turn after turn, forcing every Draw onto the much slower
+    # full-regeneration fallback. gemma-4-26b-a4b is a non-reasoning
+    # instruction-tuned model (no "thinking" tokens burning the time/output
+    # budget the way a reasoning-tagged free model would) with enough
+    # capacity to follow the JSON schema reliably — re-check the endpoint
+    # above before swapping it, same as the NVIDIA list.
+    "openrouter": "google/gemma-4-26b-a4b-it:free",
     "ollama": "llama3.2:1b",
 }
 

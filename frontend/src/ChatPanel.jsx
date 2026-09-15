@@ -41,7 +41,14 @@ const CURATED_MODELS = {
   // Verified live against https://openrouter.ai/api/v1/models (public, no
   // auth needed) as of this writing — OpenRouter's free catalog turns over
   // like NVIDIA's does, so re-check that endpoint before restocking this.
-  openrouter: ['liquid/lfm-2.5-2.6b:free', 'google/gemma-4-26b-a4b-it:free', 'nex-agi/nex-n2.5-mini:free', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'],
+  // gemma-4 listed first (and used as the backend default) — the smaller
+  // liquid/lfm-2.5-2.6b struggled with this app's strict JSON-schema
+  // output (design sync/Draw Board), either failing to parse or running
+  // slow enough under free-tier rate limits that Draw fell back to the
+  // much slower full-regeneration path. Avoid picking a "reasoning"-tagged
+  // free model here — the extra thinking tokens fight the same fast,
+  // schema-only JSON output this app needs.
+  openrouter: ['google/gemma-4-26b-a4b-it:free', 'liquid/lfm-2.5-2.6b:free', 'nex-agi/nex-n2.5-mini:free'],
 };
 const CUSTOM_MODEL_VALUE = '__custom__';
 
@@ -746,7 +753,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
                 </select>
               ) : (
                 <>
-                  <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o-mini' : llmConfig.provider === 'gemini' ? 'gemini-1.5-flash' : llmConfig.provider === 'anthropic' ? 'claude-3-haiku-20240307' : llmConfig.provider === 'nvidia' ? 'mistralai/mistral-nemotron' : llmConfig.provider === 'openrouter' ? 'liquid/lfm-2.5-2.6b:free' : llmConfig.provider === 'ollama' ? 'llama3.2:1b' : 'Backend default'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
+                  <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o-mini' : llmConfig.provider === 'gemini' ? 'gemini-1.5-flash' : llmConfig.provider === 'anthropic' ? 'claude-3-haiku-20240307' : llmConfig.provider === 'nvidia' ? 'mistralai/mistral-nemotron' : llmConfig.provider === 'openrouter' ? 'google/gemma-4-26b-a4b-it:free' : llmConfig.provider === 'ollama' ? 'llama3.2:1b' : 'Backend default'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
                   {CURATED_MODELS[llmConfig.provider] && (
                     <button type="button" onClick={() => { setUseCustomModel(false); setLlmConfig({ ...llmConfig, model_name: '' }); }} className="text-[11px] text-blue-400 hover:text-blue-300 text-left">
                       ← back to the verified model list
