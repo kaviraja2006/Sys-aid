@@ -38,6 +38,10 @@ const CURATED_MODELS = {
   // don't restock this from build.nvidia.com without testing the id against
   // the API first. Re-check if "Custom…" starts getting used a lot.
   nvidia: ['mistralai/mistral-nemotron', 'nvidia/llama-3.1-nemotron-70b-instruct', 'mistralai/mistral-large-2-instruct'],
+  // Verified live against https://openrouter.ai/api/v1/models (public, no
+  // auth needed) as of this writing — OpenRouter's free catalog turns over
+  // like NVIDIA's does, so re-check that endpoint before restocking this.
+  openrouter: ['liquid/lfm-2.5-2.6b:free', 'google/gemma-4-26b-a4b-it:free', 'nex-agi/nex-n2.5-mini:free', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'],
 };
 const CUSTOM_MODEL_VALUE = '__custom__';
 
@@ -712,6 +716,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
                 <option value="gemini">Google Gemini</option>
                 <option value="anthropic">Anthropic (Claude)</option>
                 <option value="nvidia">NVIDIA (GeForce NIM)</option>
+                <option value="openrouter">OpenRouter</option>
                 <option value="openai-compatible">Custom (OpenAI Compatible)</option>
               </select>
             </div>
@@ -721,7 +726,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
                   API Key
                   <span className="text-amber-500/80 normal-case font-normal flex items-center gap-1"><AlertTriangle size={10} /> Stored insecurely in browser</span>
                 </label>
-                <input type="password" value={llmConfig.api_key} onChange={(e) => setLlmConfig({ ...llmConfig, api_key: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'sk-...' : (llmConfig.provider === 'anthropic' ? 'sk-ant-...' : 'Your API Key')} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
+                <input type="password" value={llmConfig.api_key} onChange={(e) => setLlmConfig({ ...llmConfig, api_key: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'sk-...' : (llmConfig.provider === 'anthropic' ? 'sk-ant-...' : (llmConfig.provider === 'openrouter' ? 'sk-or-...' : 'Your API Key'))} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
               </div>
             )}
             <div className="flex flex-col gap-1.5">
@@ -741,7 +746,7 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
                 </select>
               ) : (
                 <>
-                  <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o-mini' : llmConfig.provider === 'gemini' ? 'gemini-1.5-flash' : llmConfig.provider === 'anthropic' ? 'claude-3-haiku-20240307' : llmConfig.provider === 'nvidia' ? 'mistralai/mistral-nemotron' : llmConfig.provider === 'ollama' ? 'llama3.2:1b' : 'Backend default'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
+                  <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o-mini' : llmConfig.provider === 'gemini' ? 'gemini-1.5-flash' : llmConfig.provider === 'anthropic' ? 'claude-3-haiku-20240307' : llmConfig.provider === 'nvidia' ? 'mistralai/mistral-nemotron' : llmConfig.provider === 'openrouter' ? 'liquid/lfm-2.5-2.6b:free' : llmConfig.provider === 'ollama' ? 'llama3.2:1b' : 'Backend default'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
                   {CURATED_MODELS[llmConfig.provider] && (
                     <button type="button" onClick={() => { setUseCustomModel(false); setLlmConfig({ ...llmConfig, model_name: '' }); }} className="text-[11px] text-blue-400 hover:text-blue-300 text-left">
                       ← back to the verified model list
@@ -750,6 +755,11 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
                   {llmConfig.provider === 'nvidia' && (
                     <p className="text-[11px] text-gray-500">
                       Must match a live id at build.nvidia.com/models exactly — NVIDIA retires catalog ids without notice.
+                    </p>
+                  )}
+                  {llmConfig.provider === 'openrouter' && (
+                    <p className="text-[11px] text-gray-500">
+                      Must match a live id at openrouter.ai/models exactly, and end in <code>:free</code> for their no-cost tier — ids and free-tier availability change over time.
                     </p>
                   )}
                   <p className="text-[11px] text-amber-500/80 flex items-start gap-1">
