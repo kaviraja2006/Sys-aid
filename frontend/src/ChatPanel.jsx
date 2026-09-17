@@ -463,10 +463,19 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
             // remove components as the discussion evolves) so it's already
             // current by the time the user clicks Draw — but it's kept out of
             // the canvas until then; the user only wants the graph to appear
-            // on an explicit Draw click. Silent on failure — this is a
-            // background enhancement, never something to interrupt chat over.
+            // on an explicit Draw click. A failed sync surfaces as
+            // design_sync_warning below rather than blocking chat.
             if (textChunk && typeof textChunk === 'object' && typeof textChunk.design === 'string') {
               storeSyncedDesign(textChunk.design);
+              continue;
+            }
+            // Background design sync genuinely failed this turn (slow/heavy
+            // model timed out, or returned something unusable) — distinct
+            // from the normal "nothing to draw yet" case, which sends no
+            // event at all. Surface it quietly (console, not a blocking
+            // alert) since the chat reply itself is unaffected.
+            if (textChunk && typeof textChunk === 'object' && typeof textChunk.design_sync_warning === 'string') {
+              console.warn(textChunk.design_sync_warning);
               continue;
             }
             if (textChunk) {
