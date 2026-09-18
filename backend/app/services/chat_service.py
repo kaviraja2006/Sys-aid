@@ -72,7 +72,7 @@ async def handle_chat_stream(
     # slow, error-prone pass. Best-effort: a failed sync here never fails the
     # chat turn itself, since the assistant's reply already streamed fine.
     try:
-        from app.services.design_service import update_design_from_turn
+        from app.services.design_service import update_design_from_turn, DesignSyncUnavailable
         # Cap what's sent — a long markdown write-up (up to max_tokens=3072
         # worth) only needs to contribute the components/relationships it
         # names, not its full prose, to keep this pass fast.
@@ -80,6 +80,12 @@ async def handle_chat_stream(
         if updated is not None:
             canonical = json.dumps(updated, ensure_ascii=False, separators=(",", ":"))
             yield f"data: {json.dumps({'design': canonical})}\n\n"
+    except DesignSyncUnavailable as e:
+        # A real failure (timeout/bad output), not the benign "nothing to
+        # draw yet" case — tell the client so it can show a soft, non-
+        # blocking note instead of the diagram silently never updating with
+        # no explanation. Never fails the chat turn itself.
+        yield f"data: {json.dumps({'design_sync_warning': str(e)})}\n\n"
     except Exception as e:
         logger.warning("Design sync after chat turn failed: %s", e)
 

@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import asyncio
-from app.core.llm import call_llm, resolve_effective_model
+from app.core.llm import call_llm, resolve_effective_model, resolve_tier_timeout
 from app.core.rag import search_knowledge_async
 from typing import Optional, Dict, Any, List
 
@@ -95,6 +95,17 @@ _REPAIR_SYSTEM = (
 )
 
 _PLACEHOLDER_LABELS = {"", "node", "component", "item", "new node", "untitled", "n/a"}
+
+
+class DesignSyncUnavailable(Exception):
+    """
+    Raised by update_design_from_turn when the incremental design sync could
+    not complete this turn (provider timeout/error, or unusable output) —
+    distinct from returning None for the legitimate "nothing to draw yet"
+    case. Callers (chat_service) catch this to tell the user the diagram
+    wasn't updated instead of failing silently, while the chat reply itself
+    is never affected either way.
+    """
 
 
 def _clean_graph(parsed: dict) -> dict:
@@ -637,8 +648,11 @@ async def update_design_from_turn(
     # A single turn's delta only ever needs a handful of nodes/edges — capped
     # small on purpose so a slow/heavy model still has a realistic chance of
     # finishing before the timeout below, instead of the same 4096-8192
-    # budget the full draw uses.
-    TIMEOUT_SECONDS = 30
+    # budget the full draw uses. Scaled up automatically for a known-heavy/
+    # reasoning free model (see llm.py's tiering) rather than a flat 30s that
+    # such a model almost never makes.
+    BASE_TIMEOUT_SECONDS = 30
+    TIMEOUT_SECONDS = resolve_tier_timeout(BASE_TIMEOUT_SECONDS, provider, api_key, model_name, api_url)
     try:
         raw = await asyncio.wait_for(
             call_llm(
@@ -670,7 +684,12 @@ async def update_design_from_turn(
             "Incremental design sync failed/timed out this turn [%s (%s)]: %s",
             eff_model, eff_provider, e,
         )
-        return None
+        raise DesignSyncUnavailable(
+            f"Diagram sync skipped this turn — {eff_provider} model \"{eff_model}\" "
+            "was too slow or returned an unusable response. Your reply above is "
+            "unaffected; click Draw Board to try a full sync, or switch to a "
+            "faster model in Settings if this keeps happening."
+        ) from e
 
 
 async def generate_design_stream(
@@ -758,12 +777,14 @@ async def generate_design_stream(
     # client, and only ever sends one of exactly two outcomes: a validated
     # diagram, or a clear error. A lightweight heartbeat (elapsed seconds)
     # keeps the "Drawing architecture..." UI visibly alive while waiting.
-    # 240s — a reasoning model (e.g. NVIDIA's mistral-nemotron) generating a
-    # large structured JSON graph genuinely needs more headroom than a plain
+    # 240s base — a reasoning model (e.g. NVIDIA's mistral-nemotron) generating
+    # a large structured JSON graph genuinely needs more headroom than a plain
     # chat model would; 150s was cutting off requests that were still making
-    # real progress, not stuck. The heartbeat below keeps the UI visibly
-    # alive the whole time so this doesn't read as frozen.
-    DRAW_TIMEOUT_SECONDS = 240
+    # real progress, not stuck. Scaled further for a known-heavy/reasoning
+    # free model (see llm.py's tiering) — the heartbeat below keeps the UI
+    # visibly alive the whole time either way so this doesn't read as frozen.
+    BASE_DRAW_TIMEOUT_SECONDS = 240
+    DRAW_TIMEOUT_SECONDS = resolve_tier_timeout(BASE_DRAW_TIMEOUT_SECONDS, provider, api_key, model_name, api_url)
     HEARTBEAT_INTERVAL_SECONDS = 2
 
     llm_task = asyncio.ensure_future(call_llm(

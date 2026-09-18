@@ -109,6 +109,106 @@ HEALTH_TIMEOUT_SECONDS = float(os.getenv("LLM_HEALTH_TIMEOUT_SECONDS", "60"))
 HEALTH_WARN_AFTER_SECONDS = float(os.getenv("LLM_HEALTH_WARN_AFTER_SECONDS", "8"))
 PLACEHOLDER_KEY_PREFIXES = ("your_", "replace_", "dummy", "test")
 
+# ── Model tiering — free-tier "medium/large" models need more slack ────────
+# A cold-started 70B+/reasoning free model on NVIDIA NIM or OpenRouter can
+# legitimately need 2-4x longer than a small fast model to produce the same
+# answer — not because anything is broken, but because it queues behind
+# other free-tier traffic and/or spends real time on hidden "thinking"
+# tokens before ever emitting the requested output. Paid OpenAI/Anthropic/
+# Gemini keys don't see this (dedicated capacity, no cold start), so they
+# stay on the "fast" tier unconditionally.
+HEAVY_MODEL_MARKERS = (
+    "405b", "340b", "70b", "72b", "8x22b", "command-r-plus",
+    "nemotron-70b", "nemotron-4-340b",
+)
+# Models known to spend part of their budget on hidden chain-of-thought
+# ("reasoning") tokens before the real answer — these need both the reasoning
+# suppressed (see _disable_reasoning_if_needed) AND the heavy timeout tier,
+# since even with suppression requested some providers/models partially honor it.
+REASONING_MODEL_MARKERS = (
+    "nemotron", "-r1", "deepseek-r1", "qwq", "thinking", "o1", "o3",
+)
+
+
+def _model_tier(provider: str, model_name: str) -> str:
+    """Classify a resolved (post-alias) model as fast/standard/heavy so
+    timeouts and output-token budgets can scale to match reality instead of
+    using one flat number for every model on every provider."""
+    if provider in ("openai", "anthropic", "gemini"):
+        return "fast"
+    name = (model_name or "").lower()
+    if any(marker in name for marker in HEAVY_MODEL_MARKERS) or any(
+        marker in name for marker in REASONING_MODEL_MARKERS
+    ):
+        return "heavy"
+    return "standard"
+
+
+# Flat bonus (not a multiplier) so scaling a huge explicit timeout (e.g.
+# Draw Board's 240s) doesn't balloon into minutes — a heavy model gets the
+# same fixed extra runway regardless of the caller's base timeout.
+_TIER_TIMEOUT_BONUS_SECONDS = {"fast": 0.0, "standard": 0.0, "heavy": 45.0}
+# Heavy models take a real hit to max_tokens instead: fewer tokens to emit is
+# the one lever that reliably cuts wall-clock time for a genuinely slow model
+# (there's no way to make a remote model emit tokens faster from here).
+_TIER_MAX_TOKENS_FACTOR = {"fast": 1.0, "standard": 1.0, "heavy": 0.65}
+_TIER_MAX_TOKENS_FLOOR = 512
+
+
+def _tier_timeout(base_seconds: float, provider: str, model_name: str) -> float:
+    tier = _model_tier(provider, model_name)
+    return base_seconds + _TIER_TIMEOUT_BONUS_SECONDS.get(tier, 0.0)
+
+
+def _tier_max_tokens(base_tokens: int, provider: str, model_name: str) -> int:
+    tier = _model_tier(provider, model_name)
+    factor = _TIER_MAX_TOKENS_FACTOR.get(tier, 1.0)
+    scaled = int(base_tokens * factor)
+    # The floor only ever raises a scaled-down budget back up to a sane
+    # minimum for real generation (e.g. a JSON diagram) — it must never push
+    # a caller's own intentionally tiny value (health-check pings pass
+    # max_tokens=1 on purpose) higher than what was actually requested.
+    floor = min(_TIER_MAX_TOKENS_FLOOR, base_tokens)
+    return max(floor, scaled)
+
+
+# ── Rate-limit retry — free tiers throw transient 429s under normal load ───
+# A single short retry turns a routine rate-limit blip into a slightly slower
+# response instead of a hard failure; anything past this is treated as a real
+# outage/quota exhaustion and surfaced to the caller as before.
+RATE_LIMIT_MAX_RETRIES = int(os.getenv("LLM_RATE_LIMIT_MAX_RETRIES", "1"))
+RATE_LIMIT_RETRY_BACKOFF_SECONDS = float(os.getenv("LLM_RATE_LIMIT_RETRY_BACKOFF_SECONDS", "1.5"))
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    if isinstance(e, litellm.exceptions.RateLimitError):
+        return True
+    text = str(e)
+    return "429" in text or "rate limit" in text.lower() or "rate_limit" in text.lower()
+
+
+async def _acompletion_with_retry(kwargs: dict, timeout: float):
+    """
+    Run litellm.acompletion under a hard asyncio timeout (see the comment in
+    call_llm/call_llm_stream on why the litellm-native `timeout` kwarg alone
+    isn't reliable with a shared httpx client), retrying a bounded number of
+    times ONLY on a transient rate-limit response. Any other failure —
+    including a genuine timeout — propagates immediately on the first try.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=timeout)
+        except Exception as e:
+            if isinstance(e, asyncio.TimeoutError) or not _is_rate_limit_error(e) or attempt >= RATE_LIMIT_MAX_RETRIES:
+                raise
+            attempt += 1
+            logger.warning(
+                "Rate limited by %s (attempt %d/%d) — retrying in %.1fs",
+                kwargs.get("model"), attempt, RATE_LIMIT_MAX_RETRIES, RATE_LIMIT_RETRY_BACKOFF_SECONDS,
+            )
+            await asyncio.sleep(RATE_LIMIT_RETRY_BACKOFF_SECONDS * attempt)
+
 # ── 2. Shared persistent httpx client — one SSL handshake, keep-alive pool ──
 #    litellm accepts a custom async_httpx_client so all our calls reuse it.
 # Enable HTTP/2 only if the optional ``h2`` package is installed.
@@ -351,7 +451,29 @@ def _disable_reasoning_if_needed(provider: str, model_name: str, system_prompt: 
     """
     if provider == "nvidia" and "nemotron" in model_name.lower():
         return "detailed thinking off\n" + system_prompt
+    # OpenRouter's free catalog includes several reasoning-tagged models
+    # (DeepSeek-R1-family, QwQ, etc.) that behave the same way: without this,
+    # they can spend their entire time/token budget on hidden chain-of-
+    # thought and never reach the requested JSON/answer before the timeout.
+    # OpenRouter doesn't have Nemotron's literal directive, so this is a
+    # best-effort instruction (paired with the `reasoning` request param set
+    # in _resolve_litellm_args) rather than a guaranteed provider behavior.
+    if provider == "openrouter" and any(m in model_name.lower() for m in REASONING_MODEL_MARKERS):
+        return (
+            "Do not use extended thinking, chain-of-thought, or <think> tags. "
+            "Respond immediately with only the final answer.\n" + system_prompt
+        )
     return system_prompt
+
+
+def resolve_tier_timeout(base_seconds: float, provider: str, api_key: str, model_name: str, api_url: str = "") -> float:
+    """Public wrapper so callers outside this module (design_service's own
+    outer wait_for wrapper around update_design_from_turn) can size their
+    wrapper timeout to match what call_llm will actually use internally,
+    instead of hardcoding a separate number that can drift out of sync."""
+    provider = _normalize_provider(provider, api_key, api_url)
+    model_name = _normalize_model(provider, model_name)
+    return _tier_timeout(base_seconds, provider, model_name)
 
 
 def resolve_effective_model(provider: str, api_key: str, model_name: str, api_url: str = ""):
@@ -368,6 +490,22 @@ def resolve_effective_model(provider: str, api_key: str, model_name: str, api_ur
     provider = _normalize_provider(provider, api_key, api_url)
     model_name = _normalize_model(provider, model_name)
     return provider, model_name
+
+
+def _extra_request_kwargs(provider: str, model_name: str) -> dict:
+    """
+    Best-effort provider-specific kwargs beyond model/messages/key. Wrapped by
+    the caller so an upstream that doesn't recognize a param never breaks the
+    call — this only ever helps a slow reasoning model finish faster, it's
+    never load-bearing for correctness.
+    """
+    if provider == "openrouter" and any(m in model_name.lower() for m in REASONING_MODEL_MARKERS):
+        # OpenRouter's unified "reasoning" request param — asks the routed
+        # model to skip its reasoning phase where the model supports toggling
+        # it. litellm forwards unrecognized top-level kwargs straight through
+        # for the openrouter/ route, so this rides along as extra_body.
+        return {"reasoning": {"enabled": False, "exclude": True}}
+    return {}
 
 
 def _resolve_litellm_args(provider: str, api_key: str, model_name: str, api_url: str):
@@ -431,14 +569,18 @@ async def call_llm(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    effective_timeout = _tier_timeout(timeout_seconds or GENERATE_TIMEOUT_SECONDS, provider, model_name)
+    effective_max_tokens = _tier_max_tokens(max_tokens, provider, model_name)
+
     kwargs = dict(
         model=litellm_model,
         messages=messages,
         api_key=resolved_api_key,
         temperature=0.1,
-        max_tokens=max_tokens,
+        max_tokens=effective_max_tokens,
         stream=False,
-        timeout=timeout_seconds or GENERATE_TIMEOUT_SECONDS,
+        timeout=effective_timeout,
+        **_extra_request_kwargs(provider, model_name),
     )
     if stop:
         kwargs["stop"] = stop
@@ -453,7 +595,7 @@ async def call_llm(
         # reporting the intended timeout but a much longer actual duration.
         # asyncio.wait_for is a hard, independent cutoff that always fires
         # on schedule regardless of what litellm/httpx do internally.
-        response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=kwargs["timeout"])
+        response = await _acompletion_with_retry(kwargs, timeout=kwargs["timeout"])
         result = response.choices[0].message.content
         if use_cache:
             response_cache.set(prompt, provider, model_name, result)
@@ -495,14 +637,18 @@ async def call_llm_stream(
     
     litellm_model, api_base = _resolve_litellm_args(provider, api_key, model_name, api_url)
 
+    effective_timeout = _tier_timeout(timeout_seconds or CHAT_TIMEOUT_SECONDS, provider, model_name)
+    effective_max_tokens = _tier_max_tokens(max_tokens, provider, model_name)
+
     kwargs = dict(
         model=litellm_model,
         messages=messages,
         api_key=resolved_api_key,
         temperature=0.2,
-        max_tokens=max_tokens,
+        max_tokens=effective_max_tokens,
         stream=True,
-        timeout=timeout_seconds or CHAT_TIMEOUT_SECONDS,
+        timeout=effective_timeout,
+        **_extra_request_kwargs(provider, model_name),
     )
     if stop:
         kwargs["stop"] = stop
@@ -515,7 +661,10 @@ async def call_llm_stream(
         # connect/first-response wait ourselves. Once streaming starts,
         # callers (e.g. design_service's heartbeat loop) apply their own
         # per-chunk timeout, so only the initial call needs guarding here.
-        response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=kwargs["timeout"])
+        # A retried rate-limit here still only re-runs the connect/first-
+        # response wait, never partially-streamed output (none has been
+        # yielded yet at this point).
+        response = await _acompletion_with_retry(kwargs, timeout=kwargs["timeout"])
         async for chunk in response:
             delta = chunk.choices[0].delta.content
             if delta:
