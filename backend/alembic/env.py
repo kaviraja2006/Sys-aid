@@ -24,6 +24,10 @@ config = context.config
 # database the app itself connects to.
 _env_db_url = os.getenv("DATABASE_URL")
 if _env_db_url:
+    if _env_db_url.startswith("postgres://"):
+        _env_db_url = _env_db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif _env_db_url.startswith("postgresql://"):
+        _env_db_url = _env_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     config.set_main_option("sqlalchemy.url", _env_db_url)
 
 # Interpret the config file for Python logging.

@@ -10,6 +10,12 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
+if DATABASE_URL:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
 if not DATABASE_URL:
     raise RuntimeError(
         "DATABASE_URL is not set. Add it to backend/.env, "
