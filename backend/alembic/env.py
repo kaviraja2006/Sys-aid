@@ -33,7 +33,11 @@ if _env_db_url:
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: the default (True) silences uvicorn's and
+    # the app's loggers when migrations run inside the server's lifespan, which
+    # hides the traceback of any startup failure (e.g. DB unreachable) — the
+    # process just exits with status 3 and no explanation in the logs.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Model metadata for autogenerate support — every table in db_models.py.
 target_metadata = Base.metadata
