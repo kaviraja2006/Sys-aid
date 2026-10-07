@@ -143,6 +143,22 @@ def health():
     }
 
 
+@app.get("/health/db")
+async def health_db():
+    """Runs a real query against Postgres (no auth). Ping this on a schedule
+    to keep a free-tier Supabase project from auto-pausing after 7 idle days."""
+    from sqlalchemy import text
+
+    from app.core.db import async_session_maker
+    try:
+        async with async_session_maker() as session:
+            await session.execute(text("SELECT 1"))
+        return {"status": "ok", "db": "ok"}
+    except Exception as e:
+        logger.error("DB health check failed: %s", e)
+        return ORJSONResponse({"status": "error", "db": "unreachable"}, status_code=503)
+
+
 @app.get("/health/cors")
 def health_cors(request: Request):
     """Debug endpoint to verify deployed CORS configuration."""
