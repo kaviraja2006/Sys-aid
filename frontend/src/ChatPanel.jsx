@@ -37,7 +37,7 @@ const CURATED_MODELS = {
   // included), and its own model pages can lag the API's real state, so
   // don't restock this from build.nvidia.com without testing the id against
   // the API first. Re-check if "Custom…" starts getting used a lot.
-  nvidia: ['mistralai/mistral-nemotron', 'nvidia/llama-3.1-nemotron-70b-instruct', 'mistralai/mistral-large-2-instruct'],
+  nvidia: ['nvidia/nemotron-3.5-lightning-30b-a3b', 'nvidia/nemotron-3-ultra-550b-a55b', 'nvidia/nemotron-3-super-120b-a12b'],
   // Verified live against https://openrouter.ai/api/v1/models (public, no
   // auth needed) as of this writing — OpenRouter's free catalog turns over
   // like NVIDIA's does, so re-check that endpoint before restocking this.
@@ -48,7 +48,7 @@ const CURATED_MODELS = {
   // much slower full-regeneration path. Avoid picking a "reasoning"-tagged
   // free model here — the extra thinking tokens fight the same fast,
   // schema-only JSON output this app needs.
-  openrouter: ['google/gemma-4-26b-a4b-it:free', 'liquid/lfm-2.5-2.6b:free', 'nex-agi/nex-n2.5-mini:free'],
+  openrouter: ['liquid/lfm-2.5-2.6b:free','apodex/apodex-1.1-mini:free'],
 };
 const CUSTOM_MODEL_VALUE = '__custom__';
 
