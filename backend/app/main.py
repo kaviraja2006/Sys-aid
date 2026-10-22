@@ -133,12 +133,12 @@ app.include_router(chats.router, prefix="/chats")
 app.include_router(auth_routes.router, prefix="/auth")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"msg": "SysAid running"}
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     """Health check endpoint for monitoring (no auth required)."""
     from app.core.rag import _rag_available
@@ -148,7 +148,7 @@ def health():
     }
 
 
-@app.get("/health/db")
+@app.api_route("/health/db", methods=["GET", "HEAD"])
 async def health_db():
     """Runs a real query against Postgres (no auth). Ping this on a schedule
     to keep a free-tier Supabase project from auto-pausing after 7 idle days."""
