@@ -1,0 +1,55 @@
+name: Keep-Alive (Prevent Supabase Pause)
+
+on:
+  schedule:
+    # Runs daily at 05:00 UTC (10:30 AM IST).
+    # Supabase free-tier projects auto-pause after 7 days of database inactivity.
+    # Daily query to /health/db keeps both Render awake and Supabase database active.
+    - cron: '0 5 * * *'
+  workflow_dispatch: # Allows manual trigger from GitHub Actions UI
+
+jobs:
+  ping-database:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping DB Health Check
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL || 'https://sys-aid-ds6s.onrender.com' }}
+        run: |
+          echo "=========================================================="
+          echo "Keep-Alive Ping: Preventing Supabase Inactivity Pause"
+          echo "Target URL: ${BACKEND_URL}/health/db"
+          echo "Timestamp : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          echo "=========================================================="
+
+          # Render free-tier containers sleep after 15 min of inactivity and
+          # take 50-80s to cold start. We use curl with a 120s max-time and
+          # automatic retries.
+          RESPONSE=$(curl -sS -m 120 --retry 3 --retry-delay 15 --retry-connrefused "${BACKEND_URL}/health/db" || true)
+          echo "Response: $RESPONSE"
+
+          if echo "$RESPONSE" | grep -q '"status":"ok"'; then
+            echo ""
+            echo "✅ SUCCESS: Supabase database is active and responded to query."
+            exit 0
+          fi
+
+          echo ""
+          echo "⚠️ Initial ping did not return status ok. Waiting 30s for container warm-up..."
+          sleep 30
+
+          RETRY_RESPONSE=$(curl -sS -m 120 "${BACKEND_URL}/health/db" || true)
+          echo "Retry Response: $RETRY_RESPONSE"
+
+          if echo "$RETRY_RESPONSE" | grep -q '"status":"ok"'; then
+            echo ""
+            echo "✅ SUCCESS on retry: Supabase database is active and responded."
+            exit 0
+          fi
+
+          echo ""
+          echo "❌ ERROR: Database keep-alive ping failed."
+          echo "Possible causes:"
+          echo "1. The Supabase project is already PAUSED. Go to https://supabase.com/dashboard and click 'Restore project'."
+          echo "2. The backend URL '${BACKEND_URL}' is incorrect or undergoing deployment."
+          exit 1
