@@ -83,7 +83,12 @@ async def lifespan(app: FastAPI):
         logger.warning("BACKEND_API_KEY is not set - all protected routes are running with auth DISABLED.")
 
     # Initialize Postgres tables (users, sessions, chat_sessions)
-    await init_models()
+    try:
+        await init_models()
+    except Exception as e:
+        logger.critical("Database initialization failed during startup lifespan: %s", e)
+        if os.getenv("STRICT_DB_STARTUP", "false").strip().lower() in ("true", "1"):
+            raise
 
     session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
 
@@ -149,14 +154,33 @@ async def health_db():
     to keep a free-tier Supabase project from auto-pausing after 7 idle days."""
     from sqlalchemy import text
 
-    from app.core.db import async_session_maker
+    from app.core.db import async_session_maker, init_models, _models_initialized
     try:
         async with async_session_maker() as session:
             await session.execute(text("SELECT 1"))
+
+        # If DB was unreachable during initial boot, apply any pending migrations now
+        if not _models_initialized:
+            await init_models(max_retries=2, initial_delay=1.0)
+
         return {"status": "ok", "db": "ok"}
     except Exception as e:
         logger.error("DB health check failed: %s", e)
-        return ORJSONResponse({"status": "error", "db": "unreachable"}, status_code=503)
+        err_msg = str(e)
+        hint = (
+            "If using Supabase, project may be PAUSED. Restore it at https://supabase.com/dashboard"
+            if ("tenant/user" in err_msg or "ENOTFOUND" in err_msg)
+            else "Check DATABASE_URL and network connectivity"
+        )
+        return ORJSONResponse(
+            {
+                "status": "error",
+                "db": "unreachable",
+                "detail": err_msg,
+                "hint": hint,
+            },
+            status_code=503,
+        )
 
 
 @app.get("/health/cors")
