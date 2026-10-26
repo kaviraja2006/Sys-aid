@@ -108,44 +108,82 @@ class DesignSyncUnavailable(Exception):
     """
 
 
+def _unwrap_root_graph(parsed: dict) -> dict:
+    if not isinstance(parsed, dict):
+        return parsed
+    for wrapper in ("architecture", "data", "graph", "system", "diagram"):
+        if wrapper in parsed and isinstance(parsed[wrapper], dict) and "nodes" in parsed[wrapper]:
+            return parsed[wrapper]
+    return parsed
+
+
 def _clean_graph(parsed: dict) -> dict:
     """
-    Strip low-quality output the model sometimes produces despite the prompt:
-    placeholder/empty-label nodes (often synthetic "join" nodes standing in for
-    an edge) and duplicate reverse edges between the same pair of nodes.
-    Runs BEFORE _ensure_connected so orphans created by this cleanup still get
-    reattached.
+    Normalize model output into ReactFlow archNode format and strip low-quality output:
+    placeholder/empty-label nodes and duplicate reverse edges between the same pair of nodes.
+    Supports both nested data objects and flat node formats from different LLM providers.
     """
     try:
-        nodes = parsed.get("nodes")
-        edges = parsed.get("edges")
-        if not isinstance(nodes, list):
+        parsed = _unwrap_root_graph(parsed)
+        raw_nodes = parsed.get("nodes")
+        raw_edges = parsed.get("edges")
+        if not isinstance(raw_nodes, list):
             return parsed
-        if not isinstance(edges, list):
-            edges = []
+        if not isinstance(raw_edges, list):
+            raw_edges = []
+
+        # Normalize nodes into ReactFlow archNode structure
+        normalized_nodes = []
+        for i, n in enumerate(raw_nodes):
+            if not isinstance(n, dict):
+                continue
+            nid = str(n.get("id") or f"node-{i}")
+            data = n.get("data") if isinstance(n.get("data"), dict) else {}
+            label = str(data.get("label") or n.get("label") or n.get("name") or n.get("title") or "").strip()
+            desc = str(data.get("description") or n.get("description") or "").strip()
+            stype = str(data.get("systemType") or n.get("systemType") or n.get("type") or "default").strip().lower()
+            if stype not in ("database", "server", "client", "cloud", "cache", "default"):
+                stype = "default"
+            normalized_nodes.append({
+                "id": nid,
+                "type": "archNode",
+                "data": {
+                    "label": label or f"Component {i+1}",
+                    "description": desc,
+                    "systemType": stype,
+                },
+            })
 
         def label_of(n):
-            return str(n.get("data", {}).get("label", "")).strip().lower() if isinstance(n, dict) else ""
+            return str(n.get("data", {}).get("label", "")).strip().lower()
 
         kept_nodes = [
-            n for n in nodes
-            if isinstance(n, dict) and n.get("id") and label_of(n) not in _PLACEHOLDER_LABELS
+            n for n in normalized_nodes
+            if n.get("id") and label_of(n) not in _PLACEHOLDER_LABELS
         ]
         kept_ids = {n["id"] for n in kept_nodes}
 
         deduped_edges = []
         seen_pairs = set()
-        for e in edges:
+        for i, e in enumerate(raw_edges):
             if not isinstance(e, dict):
                 continue
-            src, tgt = e.get("source"), e.get("target")
+            src = str(e.get("source") or e.get("from") or e.get("src") or "")
+            tgt = str(e.get("target") or e.get("to") or e.get("tgt") or "")
             if src not in kept_ids or tgt not in kept_ids or src == tgt:
                 continue
             pair = frozenset((src, tgt))
             if pair in seen_pairs:
                 continue
             seen_pairs.add(pair)
-            deduped_edges.append(e)
+            deduped_edges.append({
+                "id": str(e.get("id") or f"e-{src}-{tgt}-{i}"),
+                "source": src,
+                "target": tgt,
+                "label": str(e.get("label") or ""),
+                "type": "smoothstep",
+                "animated": True,
+            })
 
         parsed["nodes"] = kept_nodes
         parsed["edges"] = deduped_edges
@@ -188,20 +226,30 @@ from app.core.history import trim_history as _window_recent_history, build_summa
 def _extract_json(raw: str) -> str:
     """
     Extract the raw JSON string from the model response.
-    Strip markdown fences and any leading/trailing text.
+    Strip reasoning tags (<think>...</think>), markdown fences, and any leading/trailing text.
     """
-    s = raw.strip()
+    if not raw:
+        return ""
+    s = str(raw).strip()
 
-    # 1. Strip markdown fences: ```json ... ``` or ``` ... ```
-    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", s)
-    if fence:
-        s = fence.group(1).strip()
-    else:
-        # 2. Slice from first { to last }
-        start = s.find("{")
-        end = s.rfind("}") + 1
-        if start >= 0 and end > start:
-            s = s[start:end]
+    # 1. Strip reasoning / thinking blocks from reasoning models (e.g. DeepSeek-R1, QwQ)
+    s = re.sub(r"<think(?:ing)?>[\s\S]*?</think(?:ing)?>", "", s, flags=re.IGNORECASE).strip()
+
+    # 2. Look for code fences that contain "nodes" or 'nodes'
+    fences = re.findall(r"```(?:json)?\s*([\s\S]*?)```", s, flags=re.IGNORECASE)
+    for fence in fences:
+        if '"nodes"' in fence or "'nodes'" in fence:
+            return fence.strip()
+
+    # If any other fence exists, fallback to first fence
+    if fences:
+        return fences[0].strip()
+
+    # 3. Slice from first { to last }
+    start = s.find("{")
+    end = s.rfind("}") + 1
+    if start >= 0 and end > start:
+        s = s[start:end]
 
     return s
 
@@ -337,18 +385,20 @@ def _safe_parse(raw: str) -> dict:
     Raises json.JSONDecodeError only when all stages fail.
     """
     import ast
+    if not raw or not str(raw).strip():
+        raise json.JSONDecodeError("Empty LLM response", "", 0)
 
     # Stage 1: extract then parse as-is
     extracted = _extract_json(raw)
     try:
-        return json.loads(extracted)
+        return _unwrap_root_graph(json.loads(extracted))
     except json.JSONDecodeError:
         pass
 
     # Stage 2: apply targeted repairs then parse
     repaired = _repair_json(extracted)
     try:
-        return json.loads(repaired)
+        return _unwrap_root_graph(json.loads(repaired))
     except json.JSONDecodeError:
         pass
 
@@ -360,7 +410,7 @@ def _safe_parse(raw: str) -> dict:
         result = ast.literal_eval(ast_str)
         if isinstance(result, dict):
             # Round-trip through json to normalise types (True→true etc.)
-            return json.loads(json.dumps(result))
+            return _unwrap_root_graph(json.loads(json.dumps(result)))
     except Exception:
         pass
 
@@ -370,13 +420,13 @@ def _safe_parse(raw: str) -> dict:
     salvaged = _salvage_truncated(repaired)
     if salvaged:
         try:
-            return json.loads(salvaged)
+            return _unwrap_root_graph(json.loads(salvaged))
         except json.JSONDecodeError:
             pass
 
     # All stages failed
     raise json.JSONDecodeError(
-        f"All parsing stages failed. Raw start: {raw[:100]!r}", raw, 0
+        f"All parsing stages failed. Raw start: {str(raw)[:100]!r}", str(raw), 0
     )
 
 
