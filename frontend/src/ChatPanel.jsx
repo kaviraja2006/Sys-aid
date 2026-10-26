@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
-import { Send, Bot, User, Sparkles, RefreshCcw, ChevronLeft, ChevronRight, History, X, PenTool, Settings, Trash2, Search, CheckCircle, AlertTriangle, Mic, MicOff } from 'lucide-react';
+import {
+  Send, Bot, User, Sparkles, RefreshCcw, ChevronLeft, ChevronRight, History, X,
+  PenTool, Settings, Trash2, Search, CheckCircle, AlertTriangle, Mic, MicOff,
+  ChevronDown, Check, Zap, Cpu, Filter, Brain, Layers, ArrowRight, SlidersHorizontal,
+  CheckCircle2
+} from 'lucide-react';
 import { api, API_URL } from './config/api';
 import { secureGet, secureSet } from './utils/secureStorage';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
@@ -14,6 +19,38 @@ const initialMessage = {
   id: 1,
   role: 'ai',
   text: 'Hello! I am your AI architect. Describe the software system you would like to design today. We can brainstorm, and when you are ready, click "Draw Board" below!'
+};
+
+const isReasoningModel = (id) => {
+  const lower = (id || '').toLowerCase();
+  return (
+    lower.includes('r1') ||
+    lower.includes('reasoning') ||
+    lower.includes('qwq') ||
+    lower.includes('nemotron') ||
+    lower.includes('thinking') ||
+    lower.includes('o1') ||
+    lower.includes('o3')
+  );
+};
+
+const MODEL_FAMILIES = [
+  { id: 'deepseek', label: 'DeepSeek', color: 'from-cyan-500/20 to-blue-500/10 text-cyan-300 border-cyan-500/30', tag: 'DS', test: (id) => id.includes('deepseek') },
+  { id: 'llama', label: 'Llama', color: 'from-indigo-500/20 to-blue-500/10 text-indigo-300 border-indigo-500/30', tag: 'LL', test: (id) => id.includes('llama') },
+  { id: 'qwen', label: 'Qwen', color: 'from-violet-500/20 to-purple-500/10 text-violet-300 border-violet-500/30', tag: 'QW', test: (id) => id.includes('qwen') },
+  { id: 'mistral', label: 'Mistral', color: 'from-amber-500/20 to-orange-500/10 text-amber-300 border-amber-500/30', tag: 'MS', test: (id) => id.includes('mistral') || id.includes('mixtral') || id.includes('codestral') },
+  { id: 'gemma', label: 'Gemma', color: 'from-blue-500/20 to-sky-500/10 text-blue-300 border-blue-500/30', tag: 'GM', test: (id) => id.includes('gemma') || id.includes('gemini') },
+  { id: 'claude', label: 'Claude', color: 'from-rose-500/20 to-orange-500/10 text-rose-300 border-rose-500/30', tag: 'CL', test: (id) => id.includes('claude') },
+  { id: 'nemotron', label: 'Nemotron', color: 'from-emerald-500/20 to-teal-500/10 text-emerald-300 border-emerald-500/30', tag: 'NV', test: (id) => id.includes('nemotron') || id.includes('nvidia') },
+  { id: 'openai', label: 'OpenAI', color: 'from-teal-500/20 to-emerald-500/10 text-teal-300 border-teal-500/30', tag: 'OA', test: (id) => id.includes('gpt') || id.includes('o1') || id.includes('o3') },
+];
+
+const getModelFamilyBadge = (modelId) => {
+  const lower = (modelId || '').toLowerCase();
+  for (const fam of MODEL_FAMILIES) {
+    if (fam.test(lower)) return fam;
+  }
+  return null;
 };
 
 const generateSessionId = () => Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
@@ -128,10 +165,83 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
   const [testMessage, setTestMessage] = useState('');
   const [llmConfig, setLlmConfig] = useState(defaultLlmConfig);
   const llmConfigLoaded = useRef(false);
-  // True while the Model Name field shows a free-text box instead of the
-  // curated dropdown — either the user picked "Custom…", or a previously
-  // saved config already holds a model id outside the curated list.
   const [useCustomModel, setUseCustomModel] = useState(false);
+  const [availableModels, setAvailableModels] = useState([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+  const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
+  const [modelCategoryFilter, setModelCategoryFilter] = useState('all');
+  const modelDropdownRef = useRef(null);
+  const searchInputRef = useRef(null);
+
+  useEffect(() => {
+    if (isModelDropdownOpen) {
+      if (searchInputRef.current) {
+        searchInputRef.current.focus();
+      }
+      setTimeout(() => {
+        modelDropdownRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 50);
+    }
+  }, [isModelDropdownOpen]);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target)) {
+        setIsModelDropdownOpen(false);
+      }
+    };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setIsModelDropdownOpen(false);
+      }
+    };
+    if (isModelDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleKeyDown);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isModelDropdownOpen]);
+
+  const fetchModels = async (provider, apiKey, apiUrl) => {
+    if (!provider) {
+      setAvailableModels([]);
+      return;
+    }
+    setLoadingModels(true);
+    try {
+      const res = await api.post('/models', {
+        provider,
+        api_key: apiKey || '',
+        api_url: apiUrl || '',
+      });
+      if (res.data?.status === 'ok' && Array.isArray(res.data.models) && res.data.models.length > 0) {
+        setAvailableModels(res.data.models);
+      } else if (CURATED_MODELS[provider]) {
+        setAvailableModels(CURATED_MODELS[provider].map((m) => ({ id: m, name: m })));
+      } else {
+        setAvailableModels([]);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch provider models:', e);
+      if (CURATED_MODELS[provider]) {
+        setAvailableModels(CURATED_MODELS[provider].map((m) => ({ id: m, name: m })));
+      } else {
+        setAvailableModels([]);
+      }
+    } finally {
+      setLoadingModels(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showSettings && llmConfig.provider) {
+      fetchModels(llmConfig.provider, llmConfig.api_key, llmConfig.api_url);
+    }
+  }, [showSettings, llmConfig.provider]);
 
   // Load the encrypted config once on mount. Loading is async (Web Crypto /
   // IndexedDB), so the settings form briefly shows defaults until this resolves.
@@ -143,8 +253,6 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
       if (saved) {
         const normalized = normalizeSavedLlmConfig(saved);
         setLlmConfig(normalized);
-        const curated = CURATED_MODELS[normalized.provider];
-        setUseCustomModel(!!curated && !!normalized.model_name && !curated.includes(normalized.model_name));
       }
     });
     return () => { cancelled = true; };
@@ -723,70 +831,594 @@ export default function ChatPanel({ onGraphUpdate, onReset, currentNodes, curren
             <button onClick={() => setShowSettings(false)} className="p-1 hover:bg-[#1f2023] rounded-lg text-gray-400"><X size={18} /></button>
           </div>
           <div className="flex-1 overflow-y-auto space-y-4 custom-scrollbar text-sm text-gray-300">
+            {/* Provider Selection */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold">Provider</label>
-              <select value={llmConfig.provider} onChange={(e) => { setLlmConfig({ ...llmConfig, provider: e.target.value, model_name: '' }); setUseCustomModel(false); }} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500">
-                <option value="">Fast backend default</option>
+              <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold flex items-center gap-1.5">
+                <SlidersHorizontal size={13} className="text-blue-400" />
+                <span>AI Provider</span>
+              </label>
+              <select
+                value={llmConfig.provider}
+                onChange={(e) => {
+                  setLlmConfig({ ...llmConfig, provider: e.target.value, model_name: '' });
+                  setUseCustomModel(false);
+                  setModelCategoryFilter('all');
+                  setModelSearch('');
+                }}
+                className="w-full bg-[#12141a] border border-[#242836] hover:border-[#353a4c] rounded-xl p-2.5 text-xs text-white outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all cursor-pointer font-medium shadow-sm"
+              >
+                <option value="">Fast backend default (Recommended)</option>
                 <option value="ollama">Ollama (Local / Free)</option>
                 <option value="openai">OpenAI (ChatGPT)</option>
                 <option value="gemini">Google Gemini</option>
                 <option value="anthropic">Anthropic (Claude)</option>
-                <option value="nvidia">NVIDIA (GeForce NIM)</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="openai-compatible">Custom (OpenAI Compatible)</option>
+                <option value="nvidia">NVIDIA (GeForce NIM - 85+ Models)</option>
+                <option value="openrouter">OpenRouter (460+ Models)</option>
+                <option value="openai-compatible">Custom (OpenAI Compatible Endpoint)</option>
               </select>
             </div>
+
+            {/* API Key */}
             {llmConfig.provider && llmConfig.provider !== 'ollama' && (
               <div className="flex flex-col gap-1.5">
-                <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold flex justify-between">
-                  API Key
-                  <span className="text-amber-500/80 normal-case font-normal flex items-center gap-1"><AlertTriangle size={10} /> Stored insecurely in browser</span>
+                <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold flex justify-between items-center">
+                  <span>API Key</span>
+                  <span className="text-amber-500/90 normal-case font-normal text-[11px] flex items-center gap-1">
+                    <AlertTriangle size={11} /> Stored in encrypted browser storage
+                  </span>
                 </label>
-                <input type="password" value={llmConfig.api_key} onChange={(e) => setLlmConfig({ ...llmConfig, api_key: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'sk-...' : (llmConfig.provider === 'anthropic' ? 'sk-ant-...' : (llmConfig.provider === 'openrouter' ? 'sk-or-...' : 'Your API Key'))} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
+                <input
+                  type="password"
+                  value={llmConfig.api_key}
+                  onChange={(e) => setLlmConfig({ ...llmConfig, api_key: e.target.value })}
+                  placeholder={
+                    llmConfig.provider === 'openai'
+                      ? 'sk-...'
+                      : llmConfig.provider === 'anthropic'
+                      ? 'sk-ant-...'
+                      : llmConfig.provider === 'openrouter'
+                      ? 'sk-or-...'
+                      : llmConfig.provider === 'nvidia'
+                      ? 'nvapi-...'
+                      : 'Paste your API key here'
+                  }
+                  className="w-full bg-[#12141a] border border-[#242836] hover:border-[#353a4c] rounded-xl p-2.5 text-xs text-white placeholder-gray-500 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 font-mono transition-all shadow-sm"
+                />
               </div>
             )}
-            <div className="flex flex-col gap-1.5">
-              <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold">Model Name {llmConfig.provider === 'ollama' && '(e.g. llama3.2:1b)'}</label>
-              {CURATED_MODELS[llmConfig.provider] && !useCustomModel ? (
-                <select
-                  value={llmConfig.model_name || ''}
-                  onChange={(e) => {
-                    if (e.target.value === CUSTOM_MODEL_VALUE) { setUseCustomModel(true); return; }
-                    setLlmConfig({ ...llmConfig, model_name: e.target.value });
-                  }}
-                  className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500"
-                >
-                  <option value="">Fast backend default</option>
-                  {CURATED_MODELS[llmConfig.provider].map((m) => <option key={m} value={m}>{m}</option>)}
-                  <option value={CUSTOM_MODEL_VALUE}>Custom…</option>
-                </select>
+
+            {/* Model Selection & Filter Dropdown */}
+            <div className="flex flex-col gap-1.5" ref={modelDropdownRef}>
+              <div className="flex items-center justify-between">
+                <label className="text-gray-400 text-[12px] uppercase tracking-wider font-semibold flex items-center gap-1.5">
+                  <Cpu size={13} className="text-blue-400" />
+                  <span>Model Selection</span>
+                  {availableModels.length > 0 && (
+                    <span className="text-[11px] font-normal text-blue-400 font-mono bg-blue-500/10 px-2 py-0.5 rounded-full border border-blue-500/20">
+                      {availableModels.length} ready
+                    </span>
+                  )}
+                </label>
+                {llmConfig.provider && (
+                  <button
+                    type="button"
+                    onClick={() => fetchModels(llmConfig.provider, llmConfig.api_key, llmConfig.api_url)}
+                    disabled={loadingModels}
+                    className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1.5 transition-all px-2 py-0.5 rounded-md hover:bg-blue-500/10 border border-transparent hover:border-blue-500/20"
+                    title="Fetch all live models from provider"
+                  >
+                    <RefreshCcw size={11} className={loadingModels ? 'animate-spin text-blue-400' : ''} />
+                    <span>{loadingModels ? 'Syncing...' : 'Sync Catalog'}</span>
+                  </button>
+                )}
+              </div>
+
+              {!useCustomModel ? (
+                <div className="relative">
+                  {/* Trigger Card */}
+                  {(() => {
+                    const list = availableModels.length > 0 
+                      ? availableModels 
+                      : (CURATED_MODELS[llmConfig.provider] || []).map(m => ({ id: m, name: m }));
+                    const selectedObj = list.find(m => m.id === llmConfig.model_name);
+                    const isReasoning = selectedObj ? isReasoningModel(selectedObj.id) : (llmConfig.model_name ? isReasoningModel(llmConfig.model_name) : false);
+                    const famBadge = selectedObj ? getModelFamilyBadge(selectedObj.id) : (llmConfig.model_name ? getModelFamilyBadge(llmConfig.model_name) : null);
+
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
+                        className={`w-full bg-gradient-to-r from-[#11131a] to-[#0c0d12] hover:from-[#151722] hover:to-[#0f1118] border ${
+                          isModelDropdownOpen
+                            ? 'border-blue-500 ring-2 ring-blue-500/20 shadow-[0_4px_24px_rgba(37,99,235,0.18)]'
+                            : 'border-[#242836] hover:border-blue-500/40 shadow-sm'
+                        } rounded-xl p-3 flex items-center justify-between text-left transition-all duration-200 group`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          {/* Left Icon Avatar */}
+                          <div
+                            className={`w-8 h-8 rounded-xl flex items-center justify-center font-bold text-xs tracking-wider shrink-0 border ${
+                              !llmConfig.model_name
+                                ? 'bg-gradient-to-br from-amber-500/20 to-orange-500/10 border-amber-500/30 text-amber-400 shadow-[0_0_12px_rgba(245,158,11,0.15)]'
+                                : famBadge
+                                ? `bg-gradient-to-br ${famBadge.color}`
+                                : isReasoning
+                                ? 'bg-gradient-to-br from-purple-500/20 to-indigo-500/10 border-purple-500/30 text-purple-300 shadow-[0_0_12px_rgba(168,85,247,0.15)]'
+                                : selectedObj?.is_free
+                                ? 'bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border-emerald-500/30 text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
+                                : 'bg-gradient-to-br from-blue-500/20 to-indigo-500/10 border-blue-500/30 text-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.15)]'
+                            }`}
+                          >
+                            {!llmConfig.model_name ? (
+                              <Zap size={15} />
+                            ) : famBadge ? (
+                              famBadge.tag
+                            ) : isReasoning ? (
+                              <Brain size={15} />
+                            ) : selectedObj?.is_free ? (
+                              <Sparkles size={15} />
+                            ) : (
+                              <Cpu size={15} />
+                            )}
+                          </div>
+
+                          {/* Text Details */}
+                          <div className="truncate min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[13px] font-semibold text-white tracking-tight truncate">
+                                {selectedObj ? (selectedObj.name || selectedObj.id) : (llmConfig.model_name || 'Fast backend default')}
+                              </span>
+                              {selectedObj?.is_free && (
+                                <span className="inline-flex items-center gap-1 text-[9px] uppercase font-bold tracking-wider px-2 py-0.2 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shadow-sm">
+                                  <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
+                                  Free
+                                </span>
+                              )}
+                              {isReasoning && (
+                                <span className="inline-flex items-center gap-1 text-[9px] uppercase font-bold tracking-wider px-2 py-0.2 rounded-full bg-purple-500/15 text-purple-200 border border-purple-500/30 shadow-sm">
+                                  Reasoning
+                                </span>
+                              )}
+                              {!llmConfig.model_name && (
+                                <span className="text-[9.5px] font-semibold text-blue-400 bg-blue-500/10 px-1.5 py-0.2 rounded border border-blue-500/20">
+                                  Recommended
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[11px] font-mono text-gray-400 truncate mt-0.5">
+                              {selectedObj?.id && selectedObj.id !== selectedObj.name
+                                ? selectedObj.id
+                                : llmConfig.model_name
+                                ? llmConfig.model_name
+                                : 'Auto-selects optimal low-latency model'}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Right Controls */}
+                        <div className="flex items-center gap-2 shrink-0 ml-2">
+                          {selectedObj?.context_length && (
+                            <span className="hidden sm:inline-flex items-center text-[10px] text-gray-400 font-mono bg-[#161822] px-2 py-0.5 rounded-md border border-[#272b38]">
+                              {Math.round(selectedObj.context_length / 1000)}k ctx
+                            </span>
+                          )}
+                          <div className={`w-6 h-6 rounded-lg bg-[#161822] border border-[#262a38] flex items-center justify-center text-gray-400 group-hover:text-white transition-all ${isModelDropdownOpen ? 'bg-blue-600/20 border-blue-500/40 text-blue-400' : ''}`}>
+                            <ChevronDown
+                              size={14}
+                              className={`transition-transform duration-200 ${
+                                isModelDropdownOpen ? 'rotate-180 text-blue-400' : ''
+                              }`}
+                            />
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })()}
+
+                  {/* Dropdown Menu Popover */}
+                  {isModelDropdownOpen && (
+                    <div className="absolute left-0 right-0 top-full mt-2 bg-[#0c0d12]/98 backdrop-blur-2xl border border-[#242836] rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.06)] z-50 overflow-hidden flex flex-col">
+                      {/* Search Header */}
+                      <div className="p-2.5 bg-[#101217] border-b border-[#1c1f2b] flex items-center gap-2">
+                        <div className="relative flex-1">
+                          <Search size={13} className="absolute left-2.5 top-2.5 text-gray-400" />
+                          <input
+                            ref={searchInputRef}
+                            type="text"
+                            value={modelSearch}
+                            onChange={(e) => setModelSearch(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Escape') {
+                                setIsModelDropdownOpen(false);
+                              }
+                            }}
+                            placeholder="Search models by name, ID, or architecture..."
+                            className="w-full bg-[#161822] border border-[#262a38] focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 rounded-xl pl-8 pr-7 py-2 text-xs text-white placeholder-gray-500 outline-none transition-all shadow-inner"
+                          />
+                          {modelSearch && (
+                            <button
+                              type="button"
+                              onClick={() => setModelSearch('')}
+                              className="absolute right-2 top-2 text-gray-400 hover:text-white transition-colors"
+                              title="Clear search"
+                            >
+                              <X size={13} />
+                            </button>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsModelDropdownOpen(false);
+                            setUseCustomModel(true);
+                          }}
+                          className="px-2.5 py-2 text-[11px] font-medium text-blue-400 hover:text-blue-300 bg-blue-500/10 hover:bg-blue-500/15 border border-blue-500/25 rounded-xl shrink-0 transition-colors flex items-center gap-1.5"
+                          title="Type any custom model ID manually"
+                        >
+                          <PenTool size={11} />
+                          <span>Custom ID</span>
+                        </button>
+                      </div>
+
+                      {/* Filter Chips Toolbar */}
+                      {(() => {
+                        const list = availableModels.length > 0
+                          ? availableModels
+                          : (CURATED_MODELS[llmConfig.provider] || []).map((m) => ({ id: m, name: m }));
+                        const freeCount = list.filter((m) => m.is_free).length;
+                        const reasoningCount = list.filter((m) => isReasoningModel(m.id)).length;
+                        const matchedFamilies = MODEL_FAMILIES.map((fam) => ({
+                          ...fam,
+                          count: list.filter((m) => fam.test((m.id || '').toLowerCase())).length,
+                        })).filter((fam) => fam.count > 0);
+
+                        return (
+                          <div className="px-2.5 py-2 bg-[#0d0e14] border-b border-[#1c1f2b] flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                            {/* All */}
+                            <button
+                              type="button"
+                              onClick={() => setModelCategoryFilter('all')}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all shrink-0 flex items-center gap-1.5 ${
+                                modelCategoryFilter === 'all'
+                                  ? 'bg-blue-600 text-white shadow-[0_2px_10px_rgba(37,99,235,0.35)] border border-blue-400/30 font-semibold'
+                                  : 'bg-[#141620] hover:bg-[#1a1d28] text-gray-400 hover:text-gray-200 border border-[#232734]'
+                              }`}
+                            >
+                              <span>All</span>
+                              <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-black/40 text-gray-300 font-mono">
+                                {list.length}
+                              </span>
+                            </button>
+
+                            {/* Free */}
+                            {freeCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setModelCategoryFilter('free')}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all shrink-0 flex items-center gap-1.5 ${
+                                  modelCategoryFilter === 'free'
+                                    ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 shadow-[0_2px_10px_rgba(16,185,129,0.25)] font-semibold'
+                                    : 'bg-[#141620] hover:bg-[#1a1d28] text-gray-400 hover:text-emerald-300 border border-[#232734]'
+                                }`}
+                              >
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                <span>Free</span>
+                                <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-black/40 text-emerald-300 font-mono">
+                                  {freeCount}
+                                </span>
+                              </button>
+                            )}
+
+                            {/* Reasoning */}
+                            {reasoningCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setModelCategoryFilter('reasoning')}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all shrink-0 flex items-center gap-1.5 ${
+                                  modelCategoryFilter === 'reasoning'
+                                    ? 'bg-purple-500/25 text-purple-200 border border-purple-500/50 shadow-[0_2px_10px_rgba(168,85,247,0.25)] font-semibold'
+                                    : 'bg-[#141620] hover:bg-[#1a1d28] text-gray-400 hover:text-purple-300 border border-[#232734]'
+                                }`}
+                              >
+                                <Brain size={12} className={modelCategoryFilter === 'reasoning' ? 'text-purple-300' : 'text-purple-400/80'} />
+                                <span>Reasoning</span>
+                                <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-black/40 text-purple-300 font-mono">
+                                  {reasoningCount}
+                                </span>
+                              </button>
+                            )}
+
+                            {/* Dynamic Family Filters: DeepSeek, Llama, Qwen, etc. */}
+                            {matchedFamilies.map((fam) => {
+                              const isActive = modelCategoryFilter === fam.id;
+                              return (
+                                <button
+                                  key={fam.id}
+                                  type="button"
+                                  onClick={() => setModelCategoryFilter(fam.id)}
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all shrink-0 flex items-center gap-1.5 ${
+                                    isActive
+                                      ? 'bg-blue-600/30 text-blue-200 border border-blue-500/50 shadow-sm font-semibold'
+                                      : 'bg-[#141620] hover:bg-[#1a1d28] text-gray-400 hover:text-gray-200 border border-[#232734]'
+                                  }`}
+                                >
+                                  <span>{fam.label}</span>
+                                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-black/40 text-gray-400 font-mono">
+                                    {fam.count}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
+
+                      {/* Scrollable Model Items */}
+                      {(() => {
+                        const list = availableModels.length > 0
+                          ? availableModels
+                          : (CURATED_MODELS[llmConfig.provider] || []).map((m) => ({ id: m, name: m }));
+
+                        const filtered = list.filter((m) => {
+                          if (modelCategoryFilter === 'free' && !m.is_free) return false;
+                          if (modelCategoryFilter === 'reasoning' && !isReasoningModel(m.id)) return false;
+                          const fam = MODEL_FAMILIES.find((f) => f.id === modelCategoryFilter);
+                          if (fam && !fam.test((m.id || '').toLowerCase())) return false;
+                          if (!modelSearch) return true;
+                          const q = modelSearch.toLowerCase().trim();
+                          return (m.id && m.id.toLowerCase().includes(q)) || (m.name && m.name.toLowerCase().includes(q));
+                        });
+
+                        return (
+                          <div className="max-h-72 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                            {/* Fast backend default option (pinned at top when no search or in 'all') */}
+                            {!modelSearch && modelCategoryFilter === 'all' && (
+                              <div
+                                onClick={() => {
+                                  setLlmConfig({ ...llmConfig, model_name: '' });
+                                  setIsModelDropdownOpen(false);
+                                }}
+                                className={`p-2.5 rounded-xl cursor-pointer flex items-center justify-between text-xs transition-all border ${
+                                  !llmConfig.model_name
+                                    ? 'bg-gradient-to-r from-blue-600/20 via-blue-500/10 to-transparent border-blue-500/40 text-white shadow-sm'
+                                    : 'bg-[#12141a]/60 hover:bg-[#161924] border-[#222532] text-gray-300'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                  <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center shrink-0">
+                                    <Zap size={14} className="text-amber-400" />
+                                  </div>
+                                  <div className="truncate min-w-0 flex-1">
+                                    <div className="font-semibold text-gray-100 flex items-center gap-1.5">
+                                      <span>Fast Backend Default</span>
+                                      <span className="text-[9.5px] font-semibold text-blue-400 bg-blue-500/15 px-1.5 py-0.2 rounded border border-blue-500/30">
+                                        Recommended
+                                      </span>
+                                    </div>
+                                    <p className="text-[11px] text-gray-400 truncate mt-0.5">Auto-routes to the lowest latency verified endpoint</p>
+                                  </div>
+                                </div>
+                                {!llmConfig.model_name && (
+                                  <div className="w-5 h-5 rounded-full bg-blue-500/20 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
+                                    <Check size={12} strokeWidth={2.5} />
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Section divider & count */}
+                            <div className="px-2 pt-1.5 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-gray-400 flex items-center justify-between">
+                              <span className="flex items-center gap-1.5">
+                                <Layers size={11} className="text-blue-400" />
+                                <span>{modelCategoryFilter === 'all' ? 'Provider Catalog' : `${modelCategoryFilter.toUpperCase()} Models`}</span>
+                              </span>
+                              <span className="font-mono text-[10px] text-gray-400">
+                                {filtered.length} {filtered.length === 1 ? 'model' : 'models'}
+                              </span>
+                            </div>
+
+                            {/* Model list */}
+                            {filtered.length > 0 ? (
+                              filtered.slice(0, 100).map((m) => {
+                                const isSelected = llmConfig.model_name === m.id;
+                                const isReasoning = isReasoningModel(m.id);
+                                const famBadge = getModelFamilyBadge(m.id);
+
+                                return (
+                                  <div
+                                    key={m.id}
+                                    onClick={() => {
+                                      setLlmConfig({ ...llmConfig, model_name: m.id });
+                                      setIsModelDropdownOpen(false);
+                                    }}
+                                    className={`p-2.5 rounded-xl cursor-pointer flex items-center justify-between text-xs transition-all duration-150 group border ${
+                                      isSelected
+                                        ? 'bg-gradient-to-r from-blue-600/20 via-blue-500/10 to-transparent border-blue-500/40 text-white shadow-sm'
+                                        : 'hover:bg-[#141620] border-transparent hover:border-[#232735] text-gray-300'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2.5 min-w-0 flex-1 pr-2">
+                                      {/* Family tag / icon avatar */}
+                                      <div
+                                        className={`w-7 h-7 rounded-lg shrink-0 flex items-center justify-center font-bold text-[10px] tracking-wider border ${
+                                          famBadge
+                                            ? `bg-gradient-to-br ${famBadge.color}`
+                                            : isReasoning
+                                            ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
+                                            : m.is_free
+                                            ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                            : 'bg-[#171922] text-gray-400 border-[#262936]'
+                                        }`}
+                                      >
+                                        {famBadge ? famBadge.tag : isReasoning ? <Brain size={13} /> : m.is_free ? <Sparkles size={13} /> : <Cpu size={13} />}
+                                      </div>
+
+                                      {/* Model details */}
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className={`font-semibold truncate text-[12.5px] ${isSelected ? 'text-blue-300' : 'text-gray-100 group-hover:text-white'}`}>
+                                            {m.name || m.id}
+                                          </span>
+                                          {m.is_free && (
+                                            <span className="inline-flex items-center gap-0.5 text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                                              <span className="w-1 h-1 rounded-full bg-emerald-400" />
+                                              Free
+                                            </span>
+                                          )}
+                                          {isReasoning && (
+                                            <span className="inline-flex items-center gap-0.5 text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.2 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                                              Reasoning
+                                            </span>
+                                          )}
+                                        </div>
+                                        <p className="text-[10.5px] font-mono text-gray-400 truncate group-hover:text-gray-300 mt-0.5">
+                                          {m.id}
+                                        </p>
+                                      </div>
+                                    </div>
+
+                                    {/* Right side: Context length & Selection check */}
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      {m.context_length && (
+                                        <span className="text-[10px] text-gray-400 font-mono bg-[#141620] px-1.5 py-0.5 rounded border border-[#232734]">
+                                          {Math.round(m.context_length / 1000)}k ctx
+                                        </span>
+                                      )}
+                                      {isSelected ? (
+                                        <div className="w-5 h-5 rounded-full bg-blue-500/20 border border-blue-500/40 flex items-center justify-center text-blue-400">
+                                          <Check size={12} strokeWidth={2.5} />
+                                        </div>
+                                      ) : (
+                                        <div className="w-5" />
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            ) : (
+                              <div className="py-8 px-4 text-center border border-dashed border-[#232734] rounded-xl my-2 bg-[#0e1015]/60">
+                                <div className="w-10 h-10 rounded-full bg-[#181a24] border border-[#272b38] flex items-center justify-center mx-auto mb-2.5 text-gray-400">
+                                  <Search size={18} />
+                                </div>
+                                <p className="text-xs text-gray-200 font-medium">No models found</p>
+                                <p className="text-[11px] text-gray-400 mt-0.5 max-w-[240px] mx-auto">
+                                  No models match &ldquo;{modelSearch}&rdquo; in {modelCategoryFilter === 'all' ? 'the catalog' : `${modelCategoryFilter} category`}.
+                                </p>
+                                <div className="mt-3 flex flex-col gap-1.5 items-center">
+                                  {modelSearch && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setLlmConfig({ ...llmConfig, model_name: modelSearch.trim() });
+                                        setIsModelDropdownOpen(false);
+                                      }}
+                                      className="px-3 py-1.5 text-[11px] font-medium text-blue-300 bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/30 rounded-lg flex items-center gap-1.5 transition-all shadow-sm"
+                                    >
+                                      <span>Use &ldquo;{modelSearch}&rdquo; as custom model ID</span>
+                                      <ArrowRight size={12} />
+                                    </button>
+                                  )}
+                                  {(modelCategoryFilter !== 'all' || modelSearch) && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setModelCategoryFilter('all');
+                                        setModelSearch('');
+                                      }}
+                                      className="text-[11px] text-gray-400 hover:text-gray-200 underline mt-1"
+                                    >
+                                      Clear search & filters
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+
+                            {filtered.length > 100 && (
+                              <div className="py-2.5 text-center text-[10.5px] text-gray-400 font-mono border-t border-[#1c1f2b] mt-1">
+                                Showing top 100 of {filtered.length} models — type above to search all models instantly
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      {/* Dropdown Footer */}
+                      <div className="p-2.5 border-t border-[#1c1f2b] bg-[#0c0d12] flex items-center justify-between text-[11px]">
+                        <div className="flex items-center gap-1.5 text-gray-400">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>
+                            {availableModels.length > 0
+                              ? `${availableModels.length} models synced`
+                              : 'Curated provider models'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsModelDropdownOpen(false);
+                            setUseCustomModel(true);
+                          }}
+                          className="text-blue-400 hover:text-blue-300 font-medium flex items-center gap-1 hover:underline transition-all"
+                        >
+                          <span>Enter ID manually</span>
+                          <ArrowRight size={11} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               ) : (
-                <>
-                  <input type="text" value={llmConfig.model_name} onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })} placeholder={llmConfig.provider === 'openai' ? 'gpt-4o-mini' : llmConfig.provider === 'gemini' ? 'gemini-1.5-flash' : llmConfig.provider === 'anthropic' ? 'claude-3-haiku-20240307' : llmConfig.provider === 'nvidia' ? 'mistralai/mistral-nemotron' : llmConfig.provider === 'openrouter' ? 'google/gemma-4-26b-a4b-it:free' : llmConfig.provider === 'ollama' ? 'llama3.2:1b' : 'Backend default'} className="bg-[#111215] border border-[#2c2d31] rounded-lg p-2 outline-none focus:border-blue-500" />
-                  {CURATED_MODELS[llmConfig.provider] && (
-                    <button type="button" onClick={() => { setUseCustomModel(false); setLlmConfig({ ...llmConfig, model_name: '' }); }} className="text-[11px] text-blue-400 hover:text-blue-300 text-left">
-                      ← back to the verified model list
+                /* Custom Model ID Entry Mode */
+                <div className="flex flex-col gap-2 p-3 rounded-xl bg-gradient-to-r from-[#11131a] to-[#0c0d12] border border-[#242836]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-gray-300 flex items-center gap-1.5">
+                      <PenTool size={12} className="text-blue-400" />
+                      <span>Custom Model Identifier</span>
+                    </span>
+                    {llmConfig.model_name && (
+                      <span className="text-emerald-400 font-mono text-[10px] bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 flex items-center gap-1">
+                        <span className="w-1 h-1 rounded-full bg-emerald-400" />
+                        Active
+                      </span>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={llmConfig.model_name}
+                      onChange={(e) => setLlmConfig({ ...llmConfig, model_name: e.target.value })}
+                      placeholder={
+                        llmConfig.provider === 'openai'
+                          ? 'e.g. gpt-4o-mini'
+                          : llmConfig.provider === 'gemini'
+                          ? 'e.g. gemini-1.5-flash'
+                          : llmConfig.provider === 'anthropic'
+                          ? 'e.g. claude-3-haiku-20240307'
+                          : llmConfig.provider === 'nvidia'
+                          ? 'e.g. nvidia/nemotron-3.5-lightning-30b-a3b'
+                          : llmConfig.provider === 'openrouter'
+                          ? 'e.g. deepseek/deepseek-r1:free'
+                          : llmConfig.provider === 'ollama'
+                          ? 'e.g. llama3.2:1b'
+                          : 'e.g. provider/model-id'
+                      }
+                      className="w-full bg-[#161822] border border-[#2a2e3d] rounded-lg p-2.5 text-xs text-white placeholder-gray-500 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 font-mono transition-all shadow-inner"
+                    />
+                  </div>
+                  <div className="flex justify-between items-center text-[11px] pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setUseCustomModel(false)}
+                      className="text-blue-400 hover:text-blue-300 font-medium flex items-center gap-1 transition-colors"
+                    >
+                      <span>← Back to {availableModels.length > 0 ? `${availableModels.length} models` : 'catalog'}</span>
                     </button>
-                  )}
-                  {llmConfig.provider === 'nvidia' && (
-                    <p className="text-[11px] text-gray-500">
-                      Must match a live id at build.nvidia.com/models exactly — NVIDIA retires catalog ids without notice.
-                    </p>
-                  )}
-                  {llmConfig.provider === 'openrouter' && (
-                    <p className="text-[11px] text-gray-500">
-                      Must match a live id at openrouter.ai/models exactly, and end in <code>:free</code> for their no-cost tier — ids and free-tier availability change over time.
-                    </p>
-                  )}
-                  <p className="text-[11px] text-amber-500/80 flex items-start gap-1">
-                    <AlertTriangle size={11} className="shrink-0 mt-0.5" />
-                    Custom models aren't speed-tested. Draw Board needs a model
-                    that returns a large JSON diagram quickly — a big or
-                    "reasoning" model can time out generating one even if it
-                    chats fine. If Draw keeps failing, switch back to a
-                    verified model above.
-                  </p>
-                </>
+                    <span className="text-[10px] text-gray-500">
+                      Supports any provider model ID
+                    </span>
+                  </div>
+                </div>
               )}
             </div>
             {(llmConfig.provider === 'openai-compatible' || llmConfig.provider === 'ollama') && (

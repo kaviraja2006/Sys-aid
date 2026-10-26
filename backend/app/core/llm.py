@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 litellm.set_verbose = False
 litellm.suppress_debug_info = True
 litellm.num_retries = 0
+litellm.drop_params = True
 
 FAST_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
@@ -59,36 +60,9 @@ FAST_DEFAULT_MODELS = {
     "ollama": "llama3.2:1b",
 }
 
-# Only for genuinely slow/heavy models or ids NVIDIA has retired — never for
-# a model id that is itself valid and reasonably fast, since silently serving
-# a different model than the one the user picked is confusing on its own,
-# and doubly so if the substitute is later retired too (see history above).
-SLOW_MODEL_ALIASES = {
-    "openai": {"gpt-4o": "gpt-4o-mini", "gpt-4": "gpt-4o-mini"},
-    "gemini": {
-        "gemini-1.5-pro": "gemini-1.5-flash",
-        "gemini-pro": "gemini-1.5-flash",
-    },
-    "anthropic": {
-        "claude-3-5-sonnet-20240620": "claude-3-haiku-20240307",
-        "claude-3-opus-20240229": "claude-3-haiku-20240307",
-    },
-    # All three targets below were live-confirmed the same way as the
-    # FAST_DEFAULT_MODELS entry above, on the same date.
-    "nvidia": {
-        # extreme/slow tier -> fast default
-        "nvidia/nemotron-4-340b-instruct": "mistralai/mistral-nemotron",
-        "mistralai/mistral-large-2-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
-        # ids this app itself used to hand out (now-EOL'd) -> nearest live equivalent
-        "meta/llama-3.1-405b-instruct": "mistralai/mistral-nemotron",
-        "meta/llama-3.1-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
-        "meta/llama-3.1-8b-instruct": "mistralai/mistral-nemotron",
-        "meta/llama3-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
-        "meta/llama3-8b-instruct": "mistralai/mistral-nemotron",
-        "mistralai/mistral-7b-instruct-v0.3": "mistralai/mistral-nemotron",
-    },
-    "ollama": {"llama3": "llama3.2:1b"},
-}
+# Model aliases: default to empty so the user can connect and use ANY model
+# available from their provider without being silently hijacked to another model.
+SLOW_MODEL_ALIASES = {}
 
 # NVIDIA's free-tier hosted NIM endpoints (build.nvidia.com) spin their
 # container down after inactivity — the first call after a cold container
@@ -148,10 +122,6 @@ def _model_tier(provider: str, model_name: str) -> str:
 # Draw Board's 240s) doesn't balloon into minutes — a heavy model gets the
 # same fixed extra runway regardless of the caller's base timeout.
 _TIER_TIMEOUT_BONUS_SECONDS = {"fast": 0.0, "standard": 0.0, "heavy": 45.0}
-# Heavy models take a real hit to max_tokens instead: fewer tokens to emit is
-# the one lever that reliably cuts wall-clock time for a genuinely slow model
-# (there's no way to make a remote model emit tokens faster from here).
-_TIER_MAX_TOKENS_FACTOR = {"fast": 1.0, "standard": 1.0, "heavy": 0.65}
 _TIER_MAX_TOKENS_FLOOR = 512
 
 
@@ -162,14 +132,12 @@ def _tier_timeout(base_seconds: float, provider: str, model_name: str) -> float:
 
 def _tier_max_tokens(base_tokens: int, provider: str, model_name: str) -> int:
     tier = _model_tier(provider, model_name)
-    factor = _TIER_MAX_TOKENS_FACTOR.get(tier, 1.0)
-    scaled = int(base_tokens * factor)
-    # The floor only ever raises a scaled-down budget back up to a sane
-    # minimum for real generation (e.g. a JSON diagram) — it must never push
-    # a caller's own intentionally tiny value (health-check pings pass
-    # max_tokens=1 on purpose) higher than what was actually requested.
-    floor = min(_TIER_MAX_TOKENS_FLOOR, base_tokens)
-    return max(floor, scaled)
+    # Heavy and reasoning models generate thinking tokens in addition to the
+    # final architecture diagram JSON — never throttle their token limit,
+    # and provide sufficient headroom (at least 4096) so they do not truncate.
+    if tier == "heavy":
+        return max(base_tokens, 4096)
+    return max(min(_TIER_MAX_TOKENS_FLOOR, base_tokens), base_tokens)
 
 
 # ── Rate-limit retry — free tiers throw transient 429s under normal load ───
@@ -493,45 +461,41 @@ def resolve_effective_model(provider: str, api_key: str, model_name: str, api_ur
 
 
 def _extra_request_kwargs(provider: str, model_name: str) -> dict:
-    """
-    Best-effort provider-specific kwargs beyond model/messages/key. Wrapped by
-    the caller so an upstream that doesn't recognize a param never breaks the
-    call — this only ever helps a slow reasoning model finish faster, it's
-    never load-bearing for correctness.
-    """
-    if provider == "openrouter" and any(m in model_name.lower() for m in REASONING_MODEL_MARKERS):
-        # OpenRouter's unified "reasoning" request param — asks the routed
-        # model to skip its reasoning phase where the model supports toggling
-        # it. litellm forwards unrecognized top-level kwargs straight through
-        # for the openrouter/ route, so this rides along as extra_body.
-        return {"reasoning": {"enabled": False, "exclude": True}}
+    """Best-effort provider-specific kwargs beyond model/messages/key."""
     return {}
 
 
 def _resolve_litellm_args(provider: str, api_key: str, model_name: str, api_url: str):
-    """Map provider string to (litellm model id, api_base)."""
+    """Map provider string to (litellm model id, api_base), safely stripping duplicate prefixes."""
     model_name = _normalize_model(provider, model_name)
     api_url = _normalize_api_base(provider, api_url)
     if provider == "ollama":
+        if model_name.startswith("ollama/"):
+            model_name = model_name[len("ollama/"):]
         return f"ollama/{model_name}", api_url or OLLAMA_URL
     elif provider == "gemini":
-        # FIX: flash is the fast default — pro is slow
+        if model_name.startswith("gemini/"):
+            model_name = model_name[len("gemini/"):]
         return f"gemini/{model_name}", None
     elif provider == "anthropic":
+        if model_name.startswith("anthropic/"):
+            model_name = model_name[len("anthropic/"):]
         return f"anthropic/{model_name}", None
     elif provider == "nvidia":
-        # FIX #4: default to 8b (sub-second TTFT) not 405b (minutes TTFT)
+        if model_name.startswith("openai/"):
+            model_name = model_name[len("openai/"):]
         return (
             f"openai/{model_name}",
             "https://integrate.api.nvidia.com/v1",
         )
     elif provider == "openrouter":
-        # litellm has a native "openrouter/" route (sets the api_base and
-        # OpenRouter's required attribution headers itself) — no api_base
-        # override needed, unlike nvidia/openai-compatible above.
+        if model_name.startswith("openrouter/"):
+            model_name = model_name[len("openrouter/"):]
         return f"openrouter/{model_name}", None
     else:  # openai / openai-compatible
-        return f"openai/{model_name or FAST_DEFAULT_MODELS['openai']}", api_url or None
+        if model_name.startswith("openai/"):
+            model_name = model_name[len("openai/"):]
+        return f"openai/{model_name or FAST_DEFAULT_MODELS.get('openai', 'gpt-4o-mini')}", api_url or None
 
 
 # ── NON-STREAMING (generate-board — needs full JSON at once) ─────────────────
@@ -596,7 +560,8 @@ async def call_llm(
         # asyncio.wait_for is a hard, independent cutoff that always fires
         # on schedule regardless of what litellm/httpx do internally.
         response = await _acompletion_with_retry(kwargs, timeout=kwargs["timeout"])
-        result = response.choices[0].message.content
+        msg = response.choices[0].message
+        result = msg.content or getattr(msg, "reasoning_content", "") or ""
         if use_cache:
             response_cache.set(prompt, provider, model_name, result)
         return result
@@ -666,7 +631,7 @@ async def call_llm_stream(
         # yielded yet at this point).
         response = await _acompletion_with_retry(kwargs, timeout=kwargs["timeout"])
         async for chunk in response:
-            delta = chunk.choices[0].delta.content
+            delta = chunk.choices[0].delta.content or getattr(chunk.choices[0].delta, "reasoning_content", None)
             if delta:
                 yield delta
     except asyncio.TimeoutError as e:

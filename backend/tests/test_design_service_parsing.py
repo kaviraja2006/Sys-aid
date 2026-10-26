@@ -53,3 +53,38 @@ def test_repair_json_strips_comments():
 def test_extract_json_slices_from_first_brace_to_last():
     raw = 'prefix noise {"a": 1} suffix noise'
     assert _extract_json(raw) == '{"a": 1}'
+
+
+def test_safe_parse_strips_thinking_tags():
+    raw = '<think>\nBrainstorming with {"nodes": []} and details.\n</think>\n```json\n{"nodes": [{"id": "n1"}], "edges": []}\n```'
+    parsed = _safe_parse(raw)
+    assert len(parsed["nodes"]) == 1
+    assert parsed["nodes"][0]["id"] == "n1"
+
+
+def test_safe_parse_unwraps_root_key():
+    raw = '{"architecture": {"nodes": [{"id": "api"}], "edges": []}}'
+    parsed = _safe_parse(raw)
+    assert "nodes" in parsed
+    assert len(parsed["nodes"]) == 1
+
+
+def test_clean_graph_normalizes_flat_nodes():
+    from app.services.design_service import _clean_graph
+    raw = {
+        "nodes": [
+            {"id": "api", "label": "API Gateway", "type": "server"},
+            {"id": "db", "name": "Postgres", "type": "database"}
+        ],
+        "edges": [
+            {"from": "api", "to": "db", "label": "SQL"}
+        ]
+    }
+    cleaned = _clean_graph(raw)
+    assert len(cleaned["nodes"]) == 2
+    assert cleaned["nodes"][0]["data"]["label"] == "API Gateway"
+    assert cleaned["nodes"][1]["data"]["label"] == "Postgres"
+    assert len(cleaned["edges"]) == 1
+    assert cleaned["edges"][0]["source"] == "api"
+    assert cleaned["edges"][0]["target"] == "db"
+
