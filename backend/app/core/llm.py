@@ -510,6 +510,7 @@ async def call_llm(
     stop: list = None,
     timeout_seconds: float = None,
     use_cache: bool = True,
+    json_mode: bool = False,
 ):
     provider = _normalize_provider(provider, api_key, api_url)
     model_name = _normalize_model(provider, model_name)
@@ -546,6 +547,10 @@ async def call_llm(
         timeout=effective_timeout,
         **_extra_request_kwargs(provider, model_name),
     )
+    if json_mode:
+        # Enforce json_object response format on providers that support it
+        if provider in ("openai", "openrouter", "gemini", "ollama", "openai-compatible"):
+            kwargs["response_format"] = {"type": "json_object"}
     if stop:
         kwargs["stop"] = stop
     if api_base:
