@@ -12,86 +12,27 @@ from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
-# ── System prompt ─────────────────────────────────────────────────────────────
-# Rules:
-#  • Use double-quoted keys/values in the example — models mirror the style
-#  • Be explicit: "valid JSON only", "no markdown", "no explanation"
-#  • Keep it short — fewer input tokens = faster response
+# ── System prompt (ultra-lean schema-first prompt: ~180 tokens vs 1,250 tokens) ───
 _SYSTEM = (
-    'You are a system architecture expert designing production-grade architecture diagrams. '
-    'Respond with ONLY a single valid JSON object — no markdown, no explanation, no code fences. '
-    'The JSON must have keys "nodes" and "edges" (plus "removed_node_ids", see rule 8, only when it applies). '
-    'Each node: {"id":"string","type":"archNode","data":{"label":"string","description":"string","systemType":"string"}} '
-    'systemType must be one of: database, server, client, cloud, cache, default. '
-    'Each edge: {"id":"string","source":"nodeId","target":"nodeId","label":"string","type":"smoothstep","animated":true} '
-    'Every node must be connected via at least one edge. '
-    'Edge source and target must exactly match existing node ids. '
-    'Rules for a clean, real architecture (violating these produces an unusable diagram): '
-    '(1) Every node label and description must be specific to the system being designed — '
-    'never use a generic placeholder like "Node", "Component", or "Item". '
-    '(2) Never create a node that only represents a connection or relationship between two other '
-    'nodes (a "join" or "link" node) — express relationships as edges only, not as extra nodes. '
-    '(3) Between any two nodes, draw at most ONE edge. Do not add a reverse edge duplicating '
-    'a relationship already expressed (e.g. if A -> B is drawn, do not also draw B -> A) — '
-    'if the interaction is bidirectional, say so in the single edge label instead. '
-    '(4) Keep the graph as small and precise as the request calls for — do not pad it with '
-    'redundant or filler nodes just to look more complete. '
-    '(5) Do not draw redundant parallel paths to the same destination: if a component such as a '
-    'Load Balancer already fronts a downstream service, ALL upstream traffic to that service must '
-    'flow only through it — never also draw a direct edge that bypasses it. '
-    '(6) When a request asks you to add a new capability (e.g. AI, search, analytics, logging) to a '
-    'system that has explicit privacy or end-to-end-encryption guarantees, you must pick ONE explicit, '
-    'consistent privacy model for that capability and represent only that path — for example either '
-    '"processing happens client-side before encryption" or "the server only ever receives already-'
-    'encrypted or derived data". Never draw both a client-side and a server-side variant of the same '
-    'processing step side by side without being asked to compare them, and never wire a shared raw-data '
-    'path (e.g. a message queue carrying plaintext payloads) directly into a new consuming service '
-    'unless the existing design already establishes that this service is authorized to see that data — '
-    'doing so silently implies the server automatically receives plaintext it should never see. '
-    '(7) If "existing_design" is present in the request, you are EXTENDING an existing diagram, not '
-    'redesigning it: every existing node (same id, label, systemType) and every existing edge (same '
-    'source, target, and meaning as its label describes) must be reproduced exactly as given, unless '
-    'the user\'s request explicitly asks to change that specific node or edge. Add only the new nodes '
-    'and edges needed for the request — never omit, rename, merge, or re-route a part of the diagram '
-    'the request did not ask you to touch. '
-    '(8) If the request explicitly asks to remove, delete, or drop a component that exists in '
-    'existing_design, omit that node (and any edge touching it) from "nodes"/"edges" AND list its exact '
-    'existing_design id in a third top-level key, "removed_node_ids" (an array of strings) — this is the '
-    'ONLY way a removal is honored, since an id simply missing from your output is otherwise treated as '
-    'an accidental drop and restored. Never put an id in removed_node_ids unless the request explicitly '
-    'asked to remove that component; omit this key entirely (or leave it empty) when nothing was removed. '
-    'The chat history is a running discussion where the user may add, remove, or revise '
-    'components over several turns — always resolve to the LATEST decision on each point, '
-    'not earlier ones that were later changed or rejected. '
-    'If an "architecture_documentation" field is present in the request, it is the FINALIZED, '
-    'authoritative description of the system — the diagram you produce and that documentation '
-    'must describe the exact same architecture. Create exactly one node for every distinct '
-    'system, service, or component explicitly named in architecture_documentation — no fewer, '
-    'and do not invent extra components that are not named there. Every relationship, data flow, '
-    'or communication path described in architecture_documentation must be represented by an edge, '
-    'and every edge you draw must correspond to something described there — do not add relationships '
-    'the documentation does not mention. Use the same names for components as the documentation uses. '
-    'The user message you receive is itself a JSON object — it is INPUT DATA describing the request, '
-    'not a template to imitate. It uses keys like "request", "history", "instruction", "existing_design" '
-    'and "architecture_documentation". NEVER reuse those key names, and never copy or restate any part '
-    'of that input JSON, in your output — your output has ONLY "nodes" and "edges", plus "removed_node_ids" '
-    'when rule (8) applies, nothing else. '
-    'Output raw JSON only. First character must be "{".'
+    "Output ONLY a single valid JSON object starting with '{'. No markdown, no fences, no explanation.\n"
+    "Schema:\n"
+    '{"nodes":[{"id":"str","type":"archNode","data":{"label":"str","description":"str","systemType":"database|server|client|cloud|cache|default"}}],'
+    '"edges":[{"id":"str","source":"nodeId","target":"nodeId","label":"str","type":"smoothstep","animated":true}],'
+    '"removed_node_ids":["str"]}\n'
+    "Rules:\n"
+    "1. Specific node labels only (no generic 'Node'/'Component'). No join/link nodes.\n"
+    "2. Max 1 edge between any two nodes (express bidirectional flow in label). Every node must be connected.\n"
+    "3. If 'existing_design' is present, preserve all existing nodes/edges unless requested to modify or remove.\n"
+    "4. If requested to delete/remove a node, omit it and add its ID to 'removed_node_ids'.\n"
+    "5. Output clean JSON only."
 )
 
 _REPAIR_SYSTEM = (
-    'You are fixing a system architecture diagram (JSON graph of nodes/edges) so it fully matches '
-    'its authoritative documentation. You will be given the current graph and a list of components '
-    'named in the documentation that are missing from the graph. '
-    'Respond with ONLY a single valid JSON object with the same shape as the input graph — keys '
-    '"nodes" and "edges" — containing the COMPLETE graph: all original nodes/edges UNCHANGED, plus '
-    'new nodes for each missing component and new edges connecting each new node into the existing '
-    'graph based on how the documentation describes it relating to other components. '
-    'Each node: {"id":"string","type":"archNode","data":{"label":"string","description":"string","systemType":"string"}} '
-    'systemType must be one of: database, server, client, cloud, cache, default. '
-    'Each edge: {"id":"string","source":"nodeId","target":"nodeId","label":"string","type":"smoothstep","animated":true} '
-    'Do not remove or rename any existing node or edge. '
-    'Output raw JSON only. First character must be "{".'
+    "You are fixing an architecture graph JSON to match documentation.\n"
+    "Output ONLY valid JSON starting with '{' with keys 'nodes' and 'edges'.\n"
+    "Keep all original nodes/edges unchanged, and add missing components as new nodes connected with edges.\n"
+    "Node format: {\"id\":\"str\",\"type\":\"archNode\",\"data\":{\"label\":\"str\",\"description\":\"str\",\"systemType\":\"database|server|client|cloud|cache|default\"}}.\n"
+    "Edge format: {\"id\":\"str\",\"source\":\"nodeId\",\"target\":\"nodeId\",\"label\":\"str\",\"type\":\"smoothstep\",\"animated\":true}."
 )
 
 _PLACEHOLDER_LABELS = {"", "node", "component", "item", "new node", "untitled", "n/a"}
@@ -226,30 +167,56 @@ from app.core.history import trim_history as _window_recent_history, build_summa
 def _extract_json(raw: str) -> str:
     """
     Extract the raw JSON string from the model response.
-    Strip reasoning tags (<think>...</think>), markdown fences, and any leading/trailing text.
+    Strips:
+      1. Reasoning / thinking blocks (<think>...</think>, <thought>...</thought>)
+      2. Conversational preambles (e.g. "We need to produce a JSON...", "Here is the JSON...", etc.)
+      3. Markdown fences (```json ... ```)
+      4. Any trailing commentary after the closing JSON bracket
     """
     if not raw:
         return ""
     s = str(raw).strip()
 
-    # 1. Strip reasoning / thinking blocks from reasoning models (e.g. DeepSeek-R1, QwQ)
-    s = re.sub(r"<think(?:ing)?>[\s\S]*?</think(?:ing)?>", "", s, flags=re.IGNORECASE).strip()
+    # 1. Strip reasoning / thinking blocks from reasoning models (e.g. DeepSeek-R1, QwQ, Nemotron)
+    s = re.sub(r"<(?:think|thinking|thought)>[\s\S]*?</(?:think|thinking|thought)>", "", s, flags=re.IGNORECASE).strip()
 
     # 2. Look for code fences that contain "nodes" or 'nodes'
     fences = re.findall(r"```(?:json)?\s*([\s\S]*?)```", s, flags=re.IGNORECASE)
     for fence in fences:
         if '"nodes"' in fence or "'nodes'" in fence:
-            return fence.strip()
+            fence_clean = fence.strip()
+            # If the fence still has commentary before the first '{', slice from '{'
+            start_idx = fence_clean.find("{")
+            end_idx = fence_clean.rfind("}") + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                return fence_clean[start_idx:end_idx].strip()
+            return fence_clean
 
-    # If any other fence exists, fallback to first fence
-    if fences:
-        return fences[0].strip()
+    # If any other fence exists, fallback to first fence if it has '{'
+    for fence in fences:
+        if "{" in fence and "}" in fence:
+            start_idx = fence.find("{")
+            end_idx = fence.rfind("}") + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                return fence[start_idx:end_idx].strip()
 
-    # 3. Slice from first { to last }
+    # 3. If there is conversational preamble (e.g. "We need to produce...", "Here is the JSON..."),
+    # find the position of the '{' that is followed by '"nodes"' or 'nodes'
+    nodes_match = re.search(r'["\']nodes["\']\s*:', s)
+    if nodes_match:
+        # Walk backwards from "nodes" to locate the outermost opening '{'
+        nodes_pos = nodes_match.start()
+        open_pos = s.rfind("{", 0, nodes_pos)
+        if open_pos >= 0:
+            end_pos = s.rfind("}") + 1
+            if end_pos > open_pos:
+                return s[open_pos:end_pos].strip()
+
+    # 4. Standard fallback: Slice from first '{' to last '}'
     start = s.find("{")
     end = s.rfind("}") + 1
     if start >= 0 and end > start:
-        s = s[start:end]
+        return s[start:end].strip()
 
     return s
 
@@ -672,22 +639,13 @@ async def update_design_from_turn(
     if summarised:
         payload["existing_design"] = summarised
         payload["instruction"] = (
-            "Sync the design with this one new exchange only. Reproduce every "
-            "node and edge in existing_design exactly as given UNLESS "
-            "assistant_response explicitly replaces, removes, or changes it — "
-            "then apply that change. Add nodes/edges only for new components "
-            "this exchange introduces. Do not rebuild or reinterpret the rest. "
-            "If this exchange asks to remove/delete/drop an existing component, "
-            "you MUST list its existing_design id in removed_node_ids (rule 8) — "
-            "simply leaving it out of nodes/edges is not enough, it will be "
-            "restored automatically otherwise."
+            "Sync design with this exchange. Keep existing nodes/edges unless explicitly changed/removed. "
+            "Add new nodes/edges. If removing a node, list its ID in removed_node_ids."
         )
     else:
         payload["instruction"] = (
-            "If this exchange already describes concrete system components, "
-            "create a new design graph for them now. If it is only a "
-            "clarifying question with no concrete architecture decided yet, "
-            'return {"nodes":[],"edges":[]} — do not invent a design.'
+            "Create a design graph if concrete architecture components are described. "
+            'Otherwise return {"nodes":[],"edges":[]}.'
         )
 
     provider = req_config.provider if req_config else "ollama"
@@ -715,6 +673,7 @@ async def update_design_from_turn(
                 max_tokens=2048,
                 timeout_seconds=TIMEOUT_SECONDS,
                 use_cache=False,
+                json_mode=True,
             ),
             timeout=TIMEOUT_SECONDS + 5,
         )
@@ -844,15 +803,10 @@ async def generate_design_stream(
         api_key=api_key,
         model_name=model_name,
         api_url=api_url,
-        # 8192 was sized for the model to have headroom, not because a real
-        # design needs that many output tokens — but output-token count is
-        # exactly what caps how long a slow model takes to finish (there's no
-        # way to make a model emit tokens faster from here). Halving this
-        # roughly halves the worst-case wall-clock time for a heavy/uncurated
-        # model without truncating any realistically-sized diagram.
         max_tokens=4096,
         timeout_seconds=DRAW_TIMEOUT_SECONDS,
         use_cache=False,  # this function keeps its own richer, design-aware cache key below
+        json_mode=True,
     ))
 
     elapsed = 0
